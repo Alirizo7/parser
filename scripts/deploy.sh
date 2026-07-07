@@ -69,12 +69,17 @@ $COMPOSE up -d --build
 log "Жду ответа на http://localhost${URL_SUFFIX}/ (до 180с)"
 ok=0
 for i in $(seq 1 60); do
-    code="$(curl -fsS -o /dev/null -w '%{http_code}' --max-time 5 "http://localhost${URL_SUFFIX}/" 2>/dev/null || true)"
-    if [ -n "$code" ] && [ "$code" != "000" ]; then
-        echo "    HTTP $code"
-        ok=1
-        break
-    fi
+    code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "http://localhost${URL_SUFFIX}/" 2>/dev/null || true)"
+    case "$code" in
+        2*|3*)
+            echo "    HTTP $code"
+            ok=1
+            break
+            ;;
+        *)
+            [ -n "$code" ] && [ "$code" != "000" ] && echo "    HTTP $code (жду готовности web)"
+            ;;
+    esac
     sleep 3
 done
 if [ "$ok" -ne 1 ]; then
