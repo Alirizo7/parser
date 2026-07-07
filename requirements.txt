@@ -5,5 +5,7 @@ celery==5.4.0
 redis==5.2.1
 # Прод-сервер (используется в Docker-образе web)
 gunicorn==23.0.0
+# Драйвер PostgreSQL (прод); в dev по умолчанию SQLite и psycopg не требуется
+psycopg[binary]==3.2.9
 # Раздача статики без отдельного nginx (удобно для MVP)
 whitenoise==6.8.2
