@@ -5,6 +5,10 @@ cd "$(dirname "$0")/.."
 
 COMPOSE="docker compose -f docker-compose.prod.yml --env-file .env.prod"
 ENV_FILE=".env.prod"
+
+if [ -z "${HTTP_PORT:-}" ] && [ -f "$ENV_FILE" ]; then
+    HTTP_PORT="$(grep -E '^HTTP_PORT=' "$ENV_FILE" | tail -1 | cut -d= -f2)"
+fi
 HTTP_PORT="${HTTP_PORT:-80}"
 export HTTP_PORT
 
