@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Django
+db.sqlite3
+/media/
+/staticfiles/
+
+# Локальная разведка/временное (см. этап 0)
+/_explore/
+/_explore_lat/
+/_explore_k/
+/карты/
+
+# Тестовые фикстуры для selfcheck: держим локально, но не коммитим (крупные бинарники)
+# assets/*.docx остаются в гите — они не .doc и не .zip
+*.zip
+*.doc
+
+# Dev-заметки / промпты
+/claude_code_prompt.md
+/prompt_*.md
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/

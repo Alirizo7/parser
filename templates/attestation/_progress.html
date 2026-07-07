@@ -1,0 +1,26 @@
+{% comment %}HTMX-фрагмент прогресса. Сам себя опрашивает каждые 1.5с.{% endcomment %}
+<div id="progress" hx-get="{% url 'attestation:status' batch.pk %}"
+     hx-trigger="load delay:1500ms" hx-swap="outerHTML"
+     class="rounded-xl border border-slate-200 bg-white p-8 shadow-sm">
+  <div class="flex items-center gap-3">
+    <span class="h-5 w-5 animate-spin rounded-full border-2 border-indigo-200 border-t-indigo-600"></span>
+    <h2 class="text-lg font-semibold text-slate-900">Обработка архива</h2>
+  </div>
+  <p class="mt-2 text-sm text-slate-500">{{ batch.stage|default:"Подготовка…" }}</p>
+
+  <div class="mt-6 h-2 w-full overflow-hidden rounded-full bg-slate-100">
+    {% if percent is not None %}
+      <div class="h-full rounded-full bg-indigo-600 transition-all" style="width: {{ percent }}%"></div>
+    {% else %}
+      <div class="h-full w-1/3 animate-pulse rounded-full bg-indigo-400"></div>
+    {% endif %}
+  </div>
+  {% if percent is not None %}<p class="mt-2 text-right text-xs text-slate-400">{{ percent }}%</p>{% endif %}
+
+  <ol class="mt-6 flex flex-wrap gap-2 text-xs">
+    <li class="rounded-full px-3 py-1 {% if 'аспаковка' in batch.stage %}bg-indigo-600 text-white{% else %}bg-slate-100 text-slate-500{% endif %}">Распаковка</li>
+    <li class="rounded-full px-3 py-1 {% if 'онвертац' in batch.stage %}bg-indigo-600 text-white{% else %}bg-slate-100 text-slate-500{% endif %}">Конвертация</li>
+    <li class="rounded-full px-3 py-1 {% if 'звлеч' in batch.stage %}bg-indigo-600 text-white{% else %}bg-slate-100 text-slate-500{% endif %}">Извлечение</li>
+    <li class="rounded-full px-3 py-1 {% if 'еречн' in batch.stage %}bg-indigo-600 text-white{% else %}bg-slate-100 text-slate-500{% endif %}">Перечень</li>
+  </ol>
+</div>

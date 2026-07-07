@@ -1,0 +1,44 @@
+# Локальный запуск: web + worker + redis (LibreOffice встроен в образ).
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  web:
+    build: .
+    command: >
+      sh -c "python manage.py migrate &&
+             gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 3"
+    environment:
+      - DJANGO_DEBUG=0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - DJANGO_MEDIA_ROOT=/app/media
+      - DJANGO_SQLITE_PATH=/app/db/db.sqlite3
+    volumes:
+      - media:/app/media
+      - db:/app/db
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+
+  worker:
+    build: .
+    command: celery -A config worker -l info --concurrency=1
+    environment:
+      - DJANGO_DEBUG=0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - DJANGO_MEDIA_ROOT=/app/media
+      - DJANGO_SQLITE_PATH=/app/db/db.sqlite3
+      - SOFFICE_BIN=/usr/bin/soffice
+    volumes:
+      - media:/app/media
+      - db:/app/db
+    depends_on:
+      - redis
+
+volumes:
+  media:
+  db:

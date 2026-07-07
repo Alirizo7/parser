@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Новая загрузка — Авто-аттестация{% endblock %}
+
+{% block content %}
+<div class="mx-auto max-w-2xl">
+  <h1 class="text-2xl font-semibold text-slate-900">Новая загрузка</h1>
+  <p class="mt-1 text-sm text-slate-500">
+    Загрузите zip-архив с картами рабочих мест и «Перечнем». После загрузки запустится фоновая обработка.
+  </p>
+
+  <form method="post" enctype="multipart/form-data" action="{% url 'attestation:upload' %}" class="mt-6"
+        x-data="{ over:false, name:'' }"
+        x-ref="form">
+    {% csrf_token %}
+    <label
+      @dragover.prevent="over=true" @dragleave.prevent="over=false"
+      @drop.prevent="over=false; const f=$event.dataTransfer.files[0]; if(f){ $refs.input.files=$event.dataTransfer.files; name=f.name; }"
+      :class="over ? 'border-indigo-400 bg-indigo-50' : 'border-slate-300 bg-white'"
+      class="flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed px-6 py-16 text-center transition">
+      <svg class="h-12 w-12 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 7.5 12 3m0 0L7.5 7.5M12 3v13.5"/>
+      </svg>
+      <p class="mt-4 text-sm text-slate-600">
+        <span class="font-medium text-indigo-600">Выберите файл</span> или перетащите сюда
+      </p>
+      <p class="mt-1 text-xs text-slate-400">.zip до 200 МБ</p>
+      <p class="mt-3 text-sm font-medium text-slate-800" x-show="name" x-text="name"></p>
+      <input x-ref="input" type="file" name="archive" accept=".zip" class="hidden"
+             @change="name = $refs.input.files.length ? $refs.input.files[0].name : ''">
+    </label>
+
+    <fieldset class="mt-6">
+      <legend class="text-sm font-medium text-slate-700">Язык выходных документов</legend>
+      <div class="mt-2 flex gap-3">
+        {% for value, label in lang_choices %}
+        <label class="flex cursor-pointer items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-sm hover:bg-slate-50 has-[:checked]:border-indigo-500 has-[:checked]:bg-indigo-50">
+          <input type="radio" name="output_lang" value="{{ value }}" {% if forloop.first %}checked{% endif %}
+                 class="text-indigo-600 focus:ring-indigo-500">
+          {{ label }}
+        </label>
+        {% endfor %}
+      </div>
+    </fieldset>
+
+    <div class="mt-6 flex items-center justify-end gap-3">
+      <a href="{% url 'attestation:dashboard' %}" class="text-sm text-slate-500 hover:text-slate-700">Отмена</a>
+      <button type="submit" :disabled="!name"
+              class="rounded-lg bg-indigo-600 px-5 py-2.5 text-sm font-medium text-white shadow-sm transition enabled:hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50">
+        Загрузить и обработать
+      </button>
+    </div>
+  </form>
+</div>
+{% endblock %}

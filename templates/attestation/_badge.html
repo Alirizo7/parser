@@ -1,0 +1,15 @@
+{% comment %}Цветной бейдж статуса батча. Ожидает переменную `batch`.{% endcomment %}
+<span class="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium
+  {% if batch.status == 'done' %}bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200
+  {% elif batch.status == 'extracted' %}bg-indigo-50 text-indigo-700 ring-1 ring-indigo-200
+  {% elif batch.status == 'processing' %}bg-amber-50 text-amber-700 ring-1 ring-amber-200
+  {% elif batch.status == 'failed' %}bg-red-50 text-red-700 ring-1 ring-red-200
+  {% else %}bg-slate-100 text-slate-600 ring-1 ring-slate-200{% endif %}">
+  <span class="h-1.5 w-1.5 rounded-full
+    {% if batch.status == 'done' %}bg-emerald-500
+    {% elif batch.status == 'extracted' %}bg-indigo-500
+    {% elif batch.status == 'processing' %}bg-amber-500 animate-pulse
+    {% elif batch.status == 'failed' %}bg-red-500
+    {% else %}bg-slate-400{% endif %}"></span>
+  {{ batch.get_status_display }}
+</span>

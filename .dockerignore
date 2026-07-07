@@ -1,0 +1,14 @@
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.pyc
+_explore/
+media/
+staticfiles/
+db.sqlite3
+*.zip
+*.doc
+*.docx
+!attestation/assets/*.docx
