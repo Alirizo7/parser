@@ -38,10 +38,22 @@
         <span class="grid h-8 w-8 place-items-center rounded-lg bg-indigo-600 text-white">А</span>
         Авто-аттестация
       </a>
-      <a href="{% url 'attestation:upload' %}"
-         class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-indigo-700">
-        + Новая загрузка
-      </a>
+      <div class="flex items-center gap-3">
+        <a href="{% url 'attestation:upload' %}"
+           class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-indigo-700">
+          + Новая загрузка
+        </a>
+        {% if user.is_authenticated %}
+          <span class="hidden text-sm text-slate-500 sm:inline">{{ user.username }}</span>
+          <form method="post" action="{% url 'logout' %}" class="m-0">
+            {% csrf_token %}
+            <button type="submit"
+                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-100">
+              Выйти
+            </button>
+          </form>
+        {% endif %}
+      </div>
     </div>
   </nav>
 

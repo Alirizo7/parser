@@ -40,6 +40,8 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    # Требует входа для ВСЕХ страниц (кроме помеченных @login_not_required).
+    "django.contrib.auth.middleware.LoginRequiredMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
@@ -84,6 +86,12 @@ else:
             "NAME": os.environ.get("DJANGO_SQLITE_PATH", str(BASE_DIR / "db.sqlite3")),
         }
     }
+
+# --- Аутентификация --------------------------------------------------------
+# LoginRequiredMiddleware отправляет всех неавторизованных на LOGIN_URL.
+LOGIN_URL = "login"
+LOGIN_REDIRECT_URL = "attestation:dashboard"
+LOGOUT_REDIRECT_URL = "login"
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
