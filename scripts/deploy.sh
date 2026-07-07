@@ -5,6 +5,14 @@ cd "$(dirname "$0")/.."
 
 COMPOSE="docker compose -f docker-compose.prod.yml --env-file .env.prod"
 ENV_FILE=".env.prod"
+HTTP_PORT="${HTTP_PORT:-80}"
+export HTTP_PORT
+
+if [ "$HTTP_PORT" = "80" ]; then
+    URL_SUFFIX=""
+else
+    URL_SUFFIX=":${HTTP_PORT}"
+fi
 
 log() { printf '\n\033[1;34m==>\033[0m %s\n' "$1"; }
 err() { printf '\n\033[1;31mERROR:\033[0m %s\n' "$1" >&2; }
@@ -58,10 +66,10 @@ fi
 log "Собираю и запускаю контейнеры"
 $COMPOSE up -d --build
 
-log "Жду ответа на http://localhost/ (до 180с)"
+log "Жду ответа на http://localhost${URL_SUFFIX}/ (до 180с)"
 ok=0
 for i in $(seq 1 60); do
-    code="$(curl -fsS -o /dev/null -w '%{http_code}' --max-time 5 http://localhost/ 2>/dev/null || true)"
+    code="$(curl -fsS -o /dev/null -w '%{http_code}' --max-time 5 "http://localhost${URL_SUFFIX}/" 2>/dev/null || true)"
     if [ -n "$code" ] && [ "$code" != "000" ]; then
         echo "    HTTP $code"
         ok=1
@@ -95,5 +103,5 @@ else:
 "
 
 log "Готово"
-echo "    Приложение: http://${SERVER_IP}/"
-echo "    Админка:    http://${SERVER_IP}/admin/"
+echo "    Приложение: http://${SERVER_IP}${URL_SUFFIX}/"
+echo "    Админка:    http://${SERVER_IP}${URL_SUFFIX}/admin/"

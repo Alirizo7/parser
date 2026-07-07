@@ -12,10 +12,21 @@
 | `redis` | redis:7-alpine | брокер Celery, пароль (том `redisdata`) | нет |
 | `web` | build `.` | gunicorn, 3 воркера, порт 8000 | только внутри сети |
 | `worker` | build `.` | Celery + LibreOffice, concurrency=1 | нет |
-| `nginx` | nginx:1.27-alpine | reverse proxy, статика/медиа | **80** |
+| `nginx` | nginx:1.27-alpine | reverse proxy, статика/медиа | **`${HTTP_PORT}` → 80** |
 
-Наружу проброшен только порт 80 (nginx). Postgres и Redis портов наружу не имеют.
-SSH (22) — на уровне ОС/фаервола.
+Наружу проброшен только один host-порт (nginx), задаётся `HTTP_PORT` (по умолчанию 80).
+Postgres и Redis портов наружу не имеют. SSH (22) — на уровне ОС/фаервола.
+
+### Co-hosting (несколько проектов на одном сервере)
+
+Compose-проект назван `attestation` (`name:` в файле), поэтому его контейнеры, тома и
+сеть изолированы и не конфликтуют с другими стеками на том же сервере. Если host-порт 80
+уже занят чужим reverse-proxy, задай свободный порт через `HTTP_PORT` — тогда приложение
+доступно по `http://<IP>:<HTTP_PORT>/`, а чужой стек не затрагивается.
+
+Пример (порт 8080): в `.env.prod` укажи `DJANGO_CSRF_TRUSTED_ORIGINS=http://<IP>:8080`
+и запускай деплой как `HTTP_PORT=8080 ./scripts/deploy.sh`. `DJANGO_ALLOWED_HOSTS` порт
+не содержит (Django сверяет только хост).
 
 Почему Postgres, а не SQLite: под тремя gunicorn-воркерами плюс Celery SQLite ловит
 write-lock. Настройки (`config/settings.py`) переключаются на Postgres автоматически,
@@ -58,12 +69,18 @@ ssh <server> 'bash -s' < scripts/audit.sh
 ./scripts/deploy.sh
 ```
 
+Если порт 80 занят другим стеком — с указанием порта:
+
+```
+HTTP_PORT=8080 ./scripts/deploy.sh
+```
+
 Скрипт идемпотентен: определяет публичный IP (env `SERVER_IP` → api.ipify.org →
 `hostname -I`), подставляет его в `.env.prod`, поднимает контейнеры
-(`up -d --build`), ждёт ответа на `:80`, создаёт суперпользователя из
+(`up -d --build`), ждёт ответа на `:${HTTP_PORT}`, создаёт суперпользователя из
 `DJANGO_SUPERUSER_*` (если его ещё нет) и печатает URL.
 
-Проверка: `http://<IP>/` и `http://<IP>/admin/`.
+Проверка: `http://<IP>:<HTTP_PORT>/` и `http://<IP>:<HTTP_PORT>/admin/`.
 
 ## CI/CD (GitHub Actions)
 
