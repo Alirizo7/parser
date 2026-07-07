@@ -29,3 +29,6 @@ db.sqlite3
 .DS_Store
 .idea/
 .vscode/
+
+# Прод-секреты — НИКОГДА не коммитить
+.env.prod
