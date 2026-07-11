@@ -80,6 +80,9 @@ def generate_documents(batch_id: int) -> None:
         p65 = render.render_6_5(
             batch.company_data, batch.extracted_data, out_dir / "6_5.docx", lang=lang
         )
+        p64 = render.render_6_4(
+            batch.company_data, batch.extracted_data, out_dir / "6_4.docx", lang=lang
+        )
         media_root = Path(settings.MEDIA_ROOT)
         _set(
             batch_id,
@@ -87,6 +90,7 @@ def generate_documents(batch_id: int) -> None:
             stage="Готово",
             output_5_1b=str(Path(p5).relative_to(media_root)),
             output_6_5=str(Path(p65).relative_to(media_root)),
+            output_6_4=str(Path(p64).relative_to(media_root)),
             error="",
         )
     except Exception as exc:  # noqa: BLE001

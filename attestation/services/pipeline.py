@@ -78,7 +78,7 @@ _workplace_sort_key = E.workplace_sort_key
 # Поля, наследуемые «а»-суффиксным рабочим местом от базового
 _SUFFIX_COPY_FIELDS = (
     "factors", "substances", "benefits", "ppe_provided",
-    "injury_risk", "privileged_pension",
+    "injury_risk", "privileged_pension", "employees_count", "female_count",
 )
 
 

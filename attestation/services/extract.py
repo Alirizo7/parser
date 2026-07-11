@@ -376,6 +376,25 @@ def _extract_subdivision(doc: Doc) -> str:
     return row_value_after_label(row, M.SUBDIVISION_ROW_ANCHOR) if row else ""
 
 
+def _extract_employee_counts(doc: Doc) -> tuple[str, str]:
+    """(ишловчилар сони, шу жумладан аёллар) из таблицы «Таркибий бўлинма».
+
+    Нужно для 6_4 (сводная қайднома по подразделениям): там строки не только
+    «сколько рабочих мест», но и «сколько на них занято людей» / «из них
+    женщин». Строка гендерной разбивки есть не во всех вариантах карты —
+    тогда возвращаем "" (НЕ "0"), чтобы при агрегации в render_6_4 отличить
+    «неизвестно» от «действительно ноль».
+    """
+    grid = find_table(doc.tables, M.SUBDIVISION_TABLE_ANCHOR)
+    if grid is None:
+        return "", ""
+    workers_row = find_row(grid, M.WORKERS_ROW_ANCHOR)
+    workers = normalize_number(row_value_after_label(workers_row, M.WORKERS_ROW_ANCHOR)) if workers_row else ""
+    female_row = find_row(grid, M.WORKERS_FEMALE_ROW_ANCHOR)
+    female = normalize_number(row_value_after_label(female_row, M.WORKERS_FEMALE_ROW_ANCHOR)) if female_row else ""
+    return workers, female
+
+
 # ---------------------------------------------------------------------------
 # СИЗ (ЯТҲВ) и льготы
 # ---------------------------------------------------------------------------
@@ -502,12 +521,20 @@ def extract_card(docx_path: str | Path, basename: str) -> dict:
     medical = is_medical(position, subdivision)
     injury_risk = _injury_risk(medical)
     pension = _extract_pension(doc)
+    employees_count, female_count = _extract_employee_counts(doc)
 
     # Флаги для подсветки в UI (поля, требующие проверки оператором)
     flags: list[str] = []
     if not factors.get("overall") or factors.get("overall") == "-":
         flags.append("overall_missing")
     flags.append("injury_risk_heuristic")     # травмоопасность (c18) — эвристика
+    if not employees_count:
+        # Нет строки «ишловчилар сони» в карте — считаем минимум 1 (карта
+        # описывает занятое рабочее место), но подсвечиваем для проверки.
+        employees_count = "1"
+        flags.append("employees_count_missing")
+    if not female_count:
+        flags.append("female_count_missing")  # нужно для 6_4; см. mapping.WORKERS_FEMALE_ROW_ANCHOR
 
     return {
         "workplace_no": workplace_no,
@@ -523,6 +550,8 @@ def extract_card(docx_path: str | Path, basename: str) -> dict:
         "benefits": benefits,
         "injury_risk": injury_risk,
         "privileged_pension": pension,
+        "employees_count": employees_count,
+        "female_count": female_count,
         "flags": flags,
     }
 

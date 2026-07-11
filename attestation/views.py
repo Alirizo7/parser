@@ -49,6 +49,8 @@ REVIEW_COLUMNS = [
     ("benefits.milk", "Сут", "select", YESNO, None),
     ("benefits.therapeutic_food", "Даво-проф.", "select", YESNO, None),
     ("privileged_pension", "Имтиёзли пенсия", "select", YESNO, None),
+    ("employees_count", "Ходимлар сони", "text", None, "employees_count_missing"),
+    ("female_count", "Шу жумладан аёллар", "text", None, "female_count_missing"),
 ]
 
 # Пояснения к флагам (для легенды и подсказок)
@@ -58,6 +60,8 @@ FLAG_HINTS = {
     "overall_missing": "Не извлечён общий класс условий труда — проверьте карту.",
     "position_mismatch": "Должность в «Перечне» и в карте на этом номере различаются — проверьте.",
     "substances_missing": "В карте не найдены вредные вещества — при необходимости добавьте вручную.",
+    "employees_count_missing": "В карте не найдена строка «Ишловчилар сони» — принято 1, проверьте (влияет на документ 6_4).",
+    "female_count_missing": "В карте не найдена гендерная разбивка — «Шу жумладан аёллар» пусто (влияет на документ 6_4).",
 }
 
 
@@ -210,11 +214,19 @@ def generate(request, pk):
 
 def download(request, pk, which):
     batch = get_object_or_404(Batch, pk=pk)
-    rel = {"5_1b": batch.output_5_1b, "6_5": batch.output_6_5}.get(which)
+    rel = {
+        "5_1b": batch.output_5_1b,
+        "6_5": batch.output_6_5,
+        "6_4": batch.output_6_4,
+    }.get(which)
     if not rel:
         raise Http404("Документ ещё не сформирован")
     path = Path(settings.MEDIA_ROOT) / rel
     if not path.exists():
         raise Http404("Файл не найден")
-    nice = {"5_1b": "5_1б.docx", "6_5": "6_5_заключение.docx"}[which]
+    nice = {
+        "5_1b": "5_1б.docx",
+        "6_5": "6_5_заключение.docx",
+        "6_4": "6_4_йиғма_қайднома.docx",
+    }[which]
     return FileResponse(open(path, "rb"), as_attachment=True, filename=nice)

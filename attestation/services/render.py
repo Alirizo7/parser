@@ -20,6 +20,7 @@ from .normalize import fold, fold_contains, to_latin
 ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
 TEMPLATE_5_1B = ASSETS_DIR / "template_5_1b.docx"
 TEMPLATE_6_5 = ASSETS_DIR / "template_6_5.docx"
+TEMPLATE_6_4 = ASSETS_DIR / "template_6_4.docx"
 
 
 def _transliterate_doc(doc, lang: str) -> None:
@@ -257,6 +258,164 @@ def render_6_5(company_data: dict, workplaces: list[dict], out_path: str | Path,
             for ci, val in enumerate(row_values_6_5(wp)):
                 if ci < len(cells):
                     set_cell_text(cells[ci], val)
+
+    _transliterate_doc(doc, lang)
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(str(out_path))
+    return out_path
+
+
+# --- 6_4: сводная қайднома (итоги по подразделениям) ------------------------
+# Таблица 1 шаблона (13 grid-колонок):
+#   c0  — название строки/подразделения
+#   c1  — итого (аттестовано рабочих мест / занято людей / из них женщин)
+#   c2..c5  — по классу условий труда: 1, 2, 3, 4
+#   c6..c8  — по классу травмоопасности: 1, 2, 3
+#   c9..c11 — обеспеченность ЯТҲВ: Мос / Мос эмас / Ятҳв кўзда тутилмаган
+#   c12 — попадает под «3-4 класс и/или ЯТҲВ не соответствует»
+#
+# Каждый блок (итог по компании, итог по подразделению) — 4 строки: строка-
+# заголовок (название) + 3 строки данных (иш ўринлари / ходимлар / аёллар).
+_ROW_KINDS = ("units", "employees", "female")
+
+
+def _to_int(value) -> int:
+    m = re.search(r"\d+", str(value or ""))
+    return int(m.group(0)) if m else 0
+
+
+def _row_weight(wp: dict, row_kind: str) -> int:
+    """«Вес» одного рабочего места в данной строке-категории."""
+    if row_kind == "units":
+        return 1
+    if row_kind == "employees":
+        return _to_int(wp.get("employees_count"))
+    return _to_int(wp.get("female_count"))  # "female"
+
+
+def _overall_degree(wp: dict) -> str:
+    """Старшая цифра общего класса («3.2» → «3»); "" если класс не извлечён."""
+    overall = (wp.get("factors") or {}).get("overall", "") or ""
+    return overall[0] if overall[:1] in ("1", "2", "3", "4") else ""
+
+
+def _aggregate_group(workplaces: list[dict]) -> dict[str, list[int]]:
+    """3 строки (units/employees/female) × 13 grid-значений (c0 не считаем)."""
+    out: dict[str, list[int]] = {}
+    for row_kind in _ROW_KINDS:
+        vals = [0] * 13
+        for wp in workplaces:
+            w = _row_weight(wp, row_kind)
+            if not w:
+                continue
+            degree = _overall_degree(wp)
+            risk = wp.get("injury_risk", "")
+            ppe = wp.get("ppe_provided", "")
+
+            vals[1] += w
+            if degree == "1":
+                vals[2] += w
+            elif degree == "2":
+                vals[3] += w
+            elif degree == "3":
+                vals[4] += w
+            elif degree == "4":
+                vals[5] += w
+            if risk == "1":
+                vals[6] += w
+            elif risk == "2":
+                vals[7] += w
+            elif risk == "3":
+                vals[8] += w
+            if ppe == "ҳа":
+                vals[9] += w
+            elif ppe == "йўқ":
+                vals[10] += w
+            else:
+                vals[11] += w
+            if degree in ("3", "4") or ppe == "йўқ":
+                vals[12] += w
+        out[row_kind] = vals
+    return out
+
+
+def _group_by_subdivision_full(workplaces: list[dict]) -> list[tuple[str, list[dict]]]:
+    """Группировка ПО ВСЕМ рабочим местам подразделения (не только соседним).
+
+    В отличие от ``_group_by_subdivision`` (для 6_5, где повтор заголовка
+    подразделения между несмежными группами — норма визуального списка),
+    6_4 — сводная таблица ИТОГОВ: каждое подразделение должно быть ровно
+    одним блоком, иначе итоги по нему разъедутся на две строки.
+    """
+    order: list[str] = []
+    buckets: dict[str, list[dict]] = {}
+    for wp in workplaces:
+        sub = wp.get("subdivision", "") or "—"
+        if sub not in buckets:
+            buckets[sub] = []
+            order.append(sub)
+        buckets[sub].append(wp)
+    return [(sub, buckets[sub]) for sub in order]
+
+
+def _fill_numeric_row(row, vals: list[int], *, unknown: bool = False) -> None:
+    """Заполнить строку данных (c1..c12); c0 — метка, не трогаем."""
+    cells = row.cells
+    for i in range(1, min(13, len(cells))):
+        set_cell_text(cells[i], "-" if unknown else str(vals[i]))
+
+
+def render_6_4(company_data: dict, workplaces: list[dict], out_path: str | Path,
+               *, template_path: str | Path = TEMPLATE_6_4, lang: str = "cyr") -> Path:
+    """Сформировать сводную қайднома 6_4 (итоги по подразделениям) из датасета.
+
+    Шаблон-ассет несёт только скелет: шапку (R0-2), блок «Корхона бўйича
+    жами» (R3 заголовок + R4-6 данные) и ОДИН прототип блока подразделения
+    (R10 заголовок + R11-13 данные) — остальные строки шаблона (в т.ч.
+    повтор шапки R7-9 и жёстко перечисленные отделы конкретного клиента, из
+    чьего архива был собран этот файл) отбрасываются: список подразделений
+    и их итоги строятся заново из датасета батча, поэтому документ одинаково
+    верно собирается для ЛЮБОГО клиента, а не только для того, чей набор
+    отделов сейчас «зашит» в файле шаблона.
+
+    «Шу жумладан аёллар»: если ни для одного рабочего места в батче не
+    извлечена гендерная разбивка (см. ``extract._extract_employee_counts``),
+    строка «аёллар» заполняется прочерками, а не нулями — «нет данных» и
+    «действительно ноль женщин» не одно и то же.
+    """
+    doc = Document(str(template_path))
+    _fill_reqs(doc.tables[0], company_data)
+    summary = doc.tables[1]
+
+    workplaces = sorted(workplaces, key=lambda w: workplace_sort_key(w.get("workplace_no", "")))
+    has_female_data = any((wp.get("female_count") or "") != "" for wp in workplaces)
+
+    rows = list(summary.rows)
+    total_data_rows = rows[4:7]                     # «Корхона бўйича жами»: 3 строки данных
+    dept_label_proto = deepcopy(rows[10]._tr)        # прототип строки-заголовка подразделения
+    dept_data_protos = [deepcopy(r._tr) for r in rows[11:14]]  # прототип 3 строк данных
+
+    # Итоговый блок по компании — заполняем на месте (заголовок R3 не трогаем)
+    totals = _aggregate_group(workplaces)
+    for row_obj, kind in zip(total_data_rows, _ROW_KINDS):
+        _fill_numeric_row(row_obj, totals[kind], unknown=(kind == "female" and not has_female_data))
+
+    # Всё остальное тело (повтор шапки + захардкоженные отделы шаблона) — долой
+    for row_obj in rows[7:]:
+        summary._tbl.remove(row_obj._tr)
+
+    for sub, members in _group_by_subdivision_full(workplaces):
+        agg = _aggregate_group(members)
+        label_tr = deepcopy(dept_label_proto)
+        summary._tbl.append(label_tr)
+        # Название подразделения — объединённая на всю ширину ячейка (одна и
+        # та же Cell под всеми индексами row.cells), достаточно записать раз.
+        set_cell_text(summary.rows[-1].cells[0], sub)
+        for proto, kind in zip(dept_data_protos, _ROW_KINDS):
+            tr = deepcopy(proto)
+            summary._tbl.append(tr)
+            _fill_numeric_row(summary.rows[-1], agg[kind], unknown=(kind == "female" and not has_female_data))
 
     _transliterate_doc(doc, lang)
     out_path = Path(out_path)
