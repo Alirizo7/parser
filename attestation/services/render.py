@@ -397,14 +397,16 @@ def render_6_4(company_data: dict, workplaces: list[dict], out_path: str | Path,
                warnings: list[str] | None = None) -> Path:
     """Сформировать сводную қайднома 6_4 (итоги по подразделениям) из датасета.
 
-    Шаблон-ассет несёт готовые 21 блок подразделений (R10, R14, R18, … по 4
-    строки: заголовок + 3 строки данных) — они заполняются НА МЕСТЕ по
-    совпадению названия (после ``fold``) с ``subdivision_6_4`` позиций, без
-    удаления/пересоздания строк, поэтому итоговый документ остаётся точной
-    копией шаблона для любого подразделения, которое в нём уже описано.
-    Подразделения из Перечня, не найденные ни в одном блоке шаблона,
-    добавляются новыми блоками в конец таблицы (см. Шаг 2/7 спецификации) —
-    сообщение об этом уходит в ``warnings``, данные при этом не теряются.
+    Шаблон-ассет несёт готовые блоки подразделений (R10, R14, R18, … по 4
+    строки: заголовок + 3 строки данных). Логика на любой архив/«Перечень»:
+    * блок шаблона, чьё название совпало (после ``fold``) с подразделением из
+      «Перечня», — заполняется НА МЕСТЕ (сохраняя форматирование шаблона);
+    * подразделение «Перечня» без блока в шаблоне — добавляется новым блоком
+      в конец (сообщение в ``warnings``, данные не теряются);
+    * блок шаблона, которого НЕТ в «Перечне» этого архива (заготовка из чужого
+      шаблона), — УДАЛЯЕТСЯ, чтобы в итоге остались только нужные подразделения.
+    Итог: набор блоков всегда равен набору подразделений «Перечня» — независимо
+    от того, под какое учреждение изначально свёрстан шаблон.
     """
     if warnings is None:
         warnings = []
@@ -423,10 +425,15 @@ def render_6_4(company_data: dict, workplaces: list[dict], out_path: str | Path,
     for row_obj, kind in zip(total_data_rows, _ROW_KINDS):
         _fill_numeric_row(row_obj, totals[kind])
 
-    # Существующие 21 блок подразделений: R10, R14, R18, … по 4 строки каждый
+    # Блоки подразделений шаблона: R10, R14, R18, … по 4 строки каждый.
     block_starts = list(range(10, len(rows), 4))
     groups = _group_positions_by_subdivision_6_4(positions)
     used: set[int] = set()
+    unused_block_rows: list = []  # строки пустых блоков шаблона — на удаление
+    # Прототип нового блока берём ДО удаления (deepcopy — не зависит от того,
+    # окажется ли исходный блок сматченным или удалённым).
+    header_proto = deepcopy(rows[block_starts[0]]._tr) if block_starts else None
+    data_protos = [deepcopy(r._tr) for r in rows[block_starts[0] + 1:block_starts[0] + 4]] if block_starts else []
     for start in block_starts:
         if start + 3 >= len(rows):
             break
@@ -435,18 +442,18 @@ def render_6_4(company_data: dict, workplaces: list[dict], out_path: str | Path,
             (i for i, (name, _) in enumerate(groups) if i not in used and fold(name) == fold(label)),
             None,
         )
-        members = groups[match_idx][1] if match_idx is not None else []
-        if match_idx is not None:
-            used.add(match_idx)
-        agg = _aggregate_group_6_4(members, warnings)
+        if match_idx is None:
+            # Такого подразделения нет в «Перечне» этого архива → блок на удаление.
+            unused_block_rows.extend(rows[start:start + 4])
+            continue
+        used.add(match_idx)
+        agg = _aggregate_group_6_4(groups[match_idx][1], warnings)
         for row_obj, kind in zip(rows[start + 1:start + 4], _ROW_KINDS):
             _fill_numeric_row(row_obj, agg[kind])
 
     # Подразделения Перечня без блока в шаблоне — добавляем блок в конец,
     # а не пропускаем молча (Шаг 2/7 спецификации).
-    if block_starts:
-        header_proto = deepcopy(rows[block_starts[0]]._tr)
-        data_protos = [deepcopy(r._tr) for r in rows[block_starts[0] + 1:block_starts[0] + 4]]
+    if header_proto is not None:
         for i, (name, members) in enumerate(groups):
             if i in used:
                 continue
@@ -459,6 +466,11 @@ def render_6_4(company_data: dict, workplaces: list[dict], out_path: str | Path,
             for proto, kind in zip(data_protos, _ROW_KINDS):
                 summary._tbl.append(deepcopy(proto))
                 _fill_numeric_row(summary.rows[-1], agg[kind])
+
+    # Удаляем пустые блоки чужого шаблона (подразделения, которых нет в «Перечне»
+    # этого архива) — делаем это ПОСЛЕ добавления новых, чтобы не сбить индексы.
+    for row_obj in unused_block_rows:
+        summary._tbl.remove(row_obj._tr)
 
     _transliterate_doc(doc, lang)
     out_path = Path(out_path)
