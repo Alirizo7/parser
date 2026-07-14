@@ -213,6 +213,12 @@ def normalize_number(value: str) -> str:
     return s
 
 
+def _to_int(value) -> int:
+    """Первое целое число в тексте («114» → 114, «-»/пусто → 0)."""
+    m = re.search(r"\d+", str(value or ""))
+    return int(m.group(0)) if m else 0
+
+
 def canon_yesno(value: str) -> str:
     """Привести значение к канону ``ҳа`` / ``йўқ``.
 

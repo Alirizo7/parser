@@ -14,8 +14,8 @@ from docx import Document
 from docx.table import Table
 
 from . import mapping as M
-from .extract import workplace_sort_key
-from .normalize import fold, fold_contains, to_latin
+from .extract import split_workplace_no, workplace_sort_key
+from .normalize import _to_int, fold, fold_contains, normalize_spaces, to_latin
 
 ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
 TEMPLATE_5_1B = ASSETS_DIR / "template_5_1b.docx"
@@ -279,19 +279,10 @@ def render_6_5(company_data: dict, workplaces: list[dict], out_path: str | Path,
 # заголовок (название) + 3 строки данных (иш ўринлари / ходимлар / аёллар).
 _ROW_KINDS = ("units", "employees", "female")
 
-
-def _to_int(value) -> int:
-    m = re.search(r"\d+", str(value or ""))
-    return int(m.group(0)) if m else 0
-
-
-def _row_weight(wp: dict, row_kind: str) -> int:
-    """«Вес» одного рабочего места в данной строке-категории."""
-    if row_kind == "units":
-        return 1
-    if row_kind == "employees":
-        return _to_int(wp.get("employees_count"))
-    return _to_int(wp.get("female_count"))  # "female"
+# Позиция считается «учтённой в 6_4», только если пайплайн сопоставил её со
+# строкой Перечня (см. pipeline._pair_perechen_positions_6_4) — иначе у неё
+# нет ключа subdivision_6_4, и включать её в подсчёт нельзя (см. mapping/extract).
+_PPE_TO_COL = {"mos": 9, "mos_emas": 10, "kutilmagan": 11}
 
 
 def _overall_degree(wp: dict) -> str:
@@ -300,18 +291,33 @@ def _overall_degree(wp: dict) -> str:
     return overall[0] if overall[:1] in ("1", "2", "3", "4") else ""
 
 
-def _aggregate_group(workplaces: list[dict]) -> dict[str, list[int]]:
-    """3 строки (units/employees/female) × 13 grid-значений (c0 не считаем)."""
+def _aggregate_group_6_4(positions: list[dict], warnings: list[str]) -> dict[str, list[int]]:
+    """3 строки (units/employees/female) × 13 grid-значений (c0 не считаем).
+
+    Источник числа работников/женщин — Перечень (``employees_count_6_4``/
+    ``female_count_6_4``, см. Шаг 4 спецификации), НЕ карта: карта даёт лишь
+    3 итоговых показателя (класс условий труда, класс травмоопасности,
+    статус ЯТҲВ) для распределения этих чисел по колонкам.
+    """
     out: dict[str, list[int]] = {}
     for row_kind in _ROW_KINDS:
         vals = [0] * 13
-        for wp in workplaces:
-            w = _row_weight(wp, row_kind)
+        for wp in positions:
+            if row_kind == "units":
+                # «а»-суффиксные строки Перечня — доп. смена/условие ТОГО ЖЕ
+                # рабочего места, не новая единица (сверено с эталоном: сумма
+                # строк БЕЗ суффикса == «Иш ўринлари, бирлик» итога компании).
+                _, suffix = split_workplace_no(wp.get("workplace_no", ""))
+                w = 0 if suffix else 1
+            elif row_kind == "employees":
+                w = _to_int(wp.get("employees_count_6_4"))
+            else:
+                w = _to_int(wp.get("female_count_6_4"))
             if not w:
                 continue
             degree = _overall_degree(wp)
-            risk = wp.get("injury_risk", "")
-            ppe = wp.get("ppe_provided", "")
+            risk = wp.get("injury_risk_class_6_4", "")
+            ppe = wp.get("ppe_status_6_4", "")
 
             vals[1] += w
             if degree == "1":
@@ -322,100 +328,127 @@ def _aggregate_group(workplaces: list[dict]) -> dict[str, list[int]]:
                 vals[4] += w
             elif degree == "4":
                 vals[5] += w
+            elif row_kind == "units":
+                warnings.append(
+                    f"{wp.get('workplace_no', '?')}: класс условий труда не извлечён из карты — "
+                    "не учтён в разбивке по классам 6_4."
+                )
             if risk == "1":
                 vals[6] += w
             elif risk == "2":
                 vals[7] += w
             elif risk == "3":
                 vals[8] += w
-            if ppe == "ҳа":
-                vals[9] += w
-            elif ppe == "йўқ":
-                vals[10] += w
-            else:
-                vals[11] += w
-            if degree in ("3", "4") or ppe == "йўқ":
+            elif row_kind == "units":
+                warnings.append(
+                    f"{wp.get('workplace_no', '?')}: класс травмоопасности не извлечён из карты — "
+                    "не учтён в разбивке по классам 6_4."
+                )
+            vals[_PPE_TO_COL.get(ppe, 11)] += w
+            if degree in ("3", "4") or ppe == "mos_emas":
                 vals[12] += w
         out[row_kind] = vals
     return out
 
 
-def _group_by_subdivision_full(workplaces: list[dict]) -> list[tuple[str, list[dict]]]:
-    """Группировка ПО ВСЕМ рабочим местам подразделения (не только соседним).
+def _group_positions_by_subdivision_6_4(positions: list[dict]) -> list[tuple[str, list[dict]]]:
+    """Группировка учтённых позиций по подразделению Перечня (одна группа = один блок).
 
-    В отличие от ``_group_by_subdivision`` (для 6_5, где повтор заголовка
-    подразделения между несмежными группами — норма визуального списка),
-    6_4 — сводная таблица ИТОГОВ: каждое подразделение должно быть ровно
-    одним блоком, иначе итоги по нему разъедутся на две строки.
+    Ключ группировки — ``fold(subdivision_6_4)`` (не учитывает регистр/письмо/
+    ъ-ь опечатки); заголовок группы — сам текст разделительной строки Перечня.
     """
     order: list[str] = []
     buckets: dict[str, list[dict]] = {}
-    for wp in workplaces:
-        sub = wp.get("subdivision", "") or "—"
-        if sub not in buckets:
-            buckets[sub] = []
-            order.append(sub)
-        buckets[sub].append(wp)
-    return [(sub, buckets[sub]) for sub in order]
+    labels: dict[str, str] = {}
+    for wp in positions:
+        sub = wp.get("subdivision_6_4", "") or "—"
+        key = fold(sub)
+        if key not in buckets:
+            buckets[key] = []
+            labels[key] = sub
+            order.append(key)
+        buckets[key].append(wp)
+    return [(labels[key], buckets[key]) for key in order]
 
 
-def _fill_numeric_row(row, vals: list[int], *, unknown: bool = False) -> None:
-    """Заполнить строку данных (c1..c12); c0 — метка, не трогаем."""
+def _fill_numeric_row(row, vals: list[int]) -> None:
+    """Заполнить строку данных (c1..c12); c0 — метка, не трогаем.
+
+    Ноль отображаем как «-» (эталон использует прочерк для отсутствующих
+    значений в каждой колонке-категории, не «0»).
+    """
     cells = row.cells
     for i in range(1, min(13, len(cells))):
-        set_cell_text(cells[i], "-" if unknown else str(vals[i]))
+        set_cell_text(cells[i], "-" if not vals[i] else str(vals[i]))
 
 
 def render_6_4(company_data: dict, workplaces: list[dict], out_path: str | Path,
-               *, template_path: str | Path = TEMPLATE_6_4, lang: str = "cyr") -> Path:
+               *, template_path: str | Path = TEMPLATE_6_4, lang: str = "cyr",
+               warnings: list[str] | None = None) -> Path:
     """Сформировать сводную қайднома 6_4 (итоги по подразделениям) из датасета.
 
-    Шаблон-ассет несёт только скелет: шапку (R0-2), блок «Корхона бўйича
-    жами» (R3 заголовок + R4-6 данные) и ОДИН прототип блока подразделения
-    (R10 заголовок + R11-13 данные) — остальные строки шаблона (в т.ч.
-    повтор шапки R7-9 и жёстко перечисленные отделы конкретного клиента, из
-    чьего архива был собран этот файл) отбрасываются: список подразделений
-    и их итоги строятся заново из датасета батча, поэтому документ одинаково
-    верно собирается для ЛЮБОГО клиента, а не только для того, чей набор
-    отделов сейчас «зашит» в файле шаблона.
-
-    «Шу жумладан аёллар»: если ни для одного рабочего места в батче не
-    извлечена гендерная разбивка (см. ``extract._extract_employee_counts``),
-    строка «аёллар» заполняется прочерками, а не нулями — «нет данных» и
-    «действительно ноль женщин» не одно и то же.
+    Шаблон-ассет несёт готовые 21 блок подразделений (R10, R14, R18, … по 4
+    строки: заголовок + 3 строки данных) — они заполняются НА МЕСТЕ по
+    совпадению названия (после ``fold``) с ``subdivision_6_4`` позиций, без
+    удаления/пересоздания строк, поэтому итоговый документ остаётся точной
+    копией шаблона для любого подразделения, которое в нём уже описано.
+    Подразделения из Перечня, не найденные ни в одном блоке шаблона,
+    добавляются новыми блоками в конец таблицы (см. Шаг 2/7 спецификации) —
+    сообщение об этом уходит в ``warnings``, данные при этом не теряются.
     """
+    if warnings is None:
+        warnings = []
     doc = Document(str(template_path))
     _fill_reqs(doc.tables[0], company_data)
     summary = doc.tables[1]
 
-    workplaces = sorted(workplaces, key=lambda w: workplace_sort_key(w.get("workplace_no", "")))
-    has_female_data = any((wp.get("female_count") or "") != "" for wp in workplaces)
+    positions = [wp for wp in workplaces if "subdivision_6_4" in wp]
+    positions.sort(key=lambda w: workplace_sort_key(w.get("workplace_no", "")))
 
     rows = list(summary.rows)
-    total_data_rows = rows[4:7]                     # «Корхона бўйича жами»: 3 строки данных
-    dept_label_proto = deepcopy(rows[10]._tr)        # прототип строки-заголовка подразделения
-    dept_data_protos = [deepcopy(r._tr) for r in rows[11:14]]  # прототип 3 строк данных
+    total_data_rows = rows[4:7]  # «Корхона бўйича жами»: 3 строки данных
 
     # Итоговый блок по компании — заполняем на месте (заголовок R3 не трогаем)
-    totals = _aggregate_group(workplaces)
+    totals = _aggregate_group_6_4(positions, warnings)
     for row_obj, kind in zip(total_data_rows, _ROW_KINDS):
-        _fill_numeric_row(row_obj, totals[kind], unknown=(kind == "female" and not has_female_data))
+        _fill_numeric_row(row_obj, totals[kind])
 
-    # Всё остальное тело (повтор шапки + захардкоженные отделы шаблона) — долой
-    for row_obj in rows[7:]:
-        summary._tbl.remove(row_obj._tr)
+    # Существующие 21 блок подразделений: R10, R14, R18, … по 4 строки каждый
+    block_starts = list(range(10, len(rows), 4))
+    groups = _group_positions_by_subdivision_6_4(positions)
+    used: set[int] = set()
+    for start in block_starts:
+        if start + 3 >= len(rows):
+            break
+        label = normalize_spaces(rows[start].cells[0].text)
+        match_idx = next(
+            (i for i, (name, _) in enumerate(groups) if i not in used and fold(name) == fold(label)),
+            None,
+        )
+        members = groups[match_idx][1] if match_idx is not None else []
+        if match_idx is not None:
+            used.add(match_idx)
+        agg = _aggregate_group_6_4(members, warnings)
+        for row_obj, kind in zip(rows[start + 1:start + 4], _ROW_KINDS):
+            _fill_numeric_row(row_obj, agg[kind])
 
-    for sub, members in _group_by_subdivision_full(workplaces):
-        agg = _aggregate_group(members)
-        label_tr = deepcopy(dept_label_proto)
-        summary._tbl.append(label_tr)
-        # Название подразделения — объединённая на всю ширину ячейка (одна и
-        # та же Cell под всеми индексами row.cells), достаточно записать раз.
-        set_cell_text(summary.rows[-1].cells[0], sub)
-        for proto, kind in zip(dept_data_protos, _ROW_KINDS):
-            tr = deepcopy(proto)
-            summary._tbl.append(tr)
-            _fill_numeric_row(summary.rows[-1], agg[kind], unknown=(kind == "female" and not has_female_data))
+    # Подразделения Перечня без блока в шаблоне — добавляем блок в конец,
+    # а не пропускаем молча (Шаг 2/7 спецификации).
+    if block_starts:
+        header_proto = deepcopy(rows[block_starts[0]]._tr)
+        data_protos = [deepcopy(r._tr) for r in rows[block_starts[0] + 1:block_starts[0] + 4]]
+        for i, (name, members) in enumerate(groups):
+            if i in used:
+                continue
+            warnings.append(
+                f"Подразделение «{name}» из Перечня не найдено ни в одном блоке шаблона 6_4 — добавлен новый блок."
+            )
+            summary._tbl.append(deepcopy(header_proto))
+            set_cell_text(summary.rows[-1].cells[0], name)
+            agg = _aggregate_group_6_4(members, warnings)
+            for proto, kind in zip(data_protos, _ROW_KINDS):
+                summary._tbl.append(deepcopy(proto))
+                _fill_numeric_row(summary.rows[-1], agg[kind])
 
     _transliterate_doc(doc, lang)
     out_path = Path(out_path)

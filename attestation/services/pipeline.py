@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import re
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -25,8 +26,12 @@ def _noop(_stage: str) -> None:
     pass
 
 
-# Имя похоже на карту: число + опц. буквенный суффикс + разделитель (./_/-/пробел)
-_CARD_NAME_HINT = re.compile(r"^\s*\d+\s*[а-яёА-ЯЁa-zA-Z]?\s*[._\-)\s]")
+# Имя похоже на карту: число + опц. буквенный суффикс + разделитель.
+# Разделитель включает ЗАПЯТУЮ: у части карт имя набрано «014,Бўлинма…» /
+# «55,Бўлинма…» (запятая вместо точки — опечатка при наборе). Без запятой в
+# классе такие файлы не опознавались как карты и молча выпадали из итога
+# (2 рабочих места, 000014 и 000055, терялись → 112 вместо 114).
+_CARD_NAME_HINT = re.compile(r"^\s*\d+\s*[а-яёА-ЯЁa-zA-Z]?\s*[.,_\-)\s]")
 
 
 def _looks_like_card_filename(basename: str) -> bool:
@@ -79,6 +84,7 @@ _workplace_sort_key = E.workplace_sort_key
 _SUFFIX_COPY_FIELDS = (
     "factors", "substances", "benefits", "ppe_provided",
     "injury_risk", "privileged_pension", "employees_count", "female_count",
+    "injury_risk_class_6_4", "ppe_status_6_4",
 )
 
 
@@ -162,7 +168,6 @@ def run_pipeline(
 
     # Папка карт = та, где БОЛЬШЕ ВСЕГО кандидатов. Так детектируем и «карта база»,
     # и плоскую «KARTA/», не цепляя одиночные файлы-имена-цифры из корня архива.
-    from collections import Counter
     folder_counts = Counter(_folder_of(uf) for uf in card_candidates)
     cards_folder = folder_counts.most_common(1)[0][0] if folder_counts else None
     cards = [uf for uf in card_candidates if _folder_of(uf) == cards_folder]
@@ -219,6 +224,7 @@ def run_pipeline(
     # 4) «Перечень» → коды должностей. Кандидатов может быть несколько
     # (напр. лист подписей «ИМЗО ПЕРЕЧЕН») — берём тот, что даёт больше записей.
     perechen_map: dict[str, dict] = {}
+    best_perechen_docx: Path | None = None
     if perechen_candidates:
         progress("Разбор «Перечня» (коды должностей)")
         for cand in perechen_candidates:
@@ -230,6 +236,7 @@ def run_pipeline(
                 continue
             if len(candidate_map) > len(perechen_map):
                 perechen_map = candidate_map
+                best_perechen_docx = p_docx
     if not perechen_map:
         warnings.append("«Перечень» с кодами должностей не найден — коды останутся пустыми.")
 
@@ -256,6 +263,38 @@ def run_pipeline(
         # Нет извлечённых веществ — подсказка оператору (в карте раздел 1.1 пуст)
         if not rec.get("substances"):
             rec["flags"].append("substances_missing")
+
+    # 5.05) 6_4: позиции берутся из строк «Перечня» (не из карт) — Шаг 3/4/5
+    # спецификации. Сопоставляем каждую строку Перечня со «своей» картой по
+    # номеру рабочего места; дубли номеров (напр. две карты одной «а»-позиции
+    # на разные смены) раскладываются по очереди в порядке появления карт —
+    # не схлопываются в одну запись. Строка без карты — исключается из 6_4
+    # и громко логируется (не подмена данными базового номера, как в 4.5:
+    # там это для 6_5/5_1б, где такая подмена уже подтверждена эталонами).
+    if best_perechen_docx is not None:
+        try:
+            perechen_positions_6_4, w = E.parse_perechen_positions_6_4(best_perechen_docx)
+        except Exception as exc:  # noqa: BLE001
+            perechen_positions_6_4, w = [], [f"6_4: не удалось разобрать «Перечень»: {exc}"]
+        warnings.extend(w)
+        queues: dict[str, deque] = {}
+        for pos in perechen_positions_6_4:
+            queues.setdefault(pos["workplace_no"], deque()).append(pos)
+        for rec in workplaces:
+            q = queues.get(rec["workplace_no"])
+            if q:
+                pos = q.popleft()
+                rec["subdivision_6_4"] = pos["subdivision"]
+                rec["employees_count_6_4"] = pos["employees_count"]
+                rec["female_count_6_4"] = pos["female_count"]
+        missing = [(no, len(q)) for no, q in queues.items() if q]
+        if missing:
+            details = "; ".join(f"{no} (не хватает карт: {n})" for no, n in missing)
+            warnings.append(
+                f"6_4: нет карты для {sum(n for _, n in missing)} позици(й) Перечня: {details}"
+            )
+    elif perechen_candidates:
+        warnings.append("6_4: не удалось выбрать «Перечень» для позиций — 6_4 будет пустым.")
 
     # 5.1) Код должности для «а»-суффиксных РМ: «Перечень» обычно не содержит
     # отдельной строки «000012а», поэтому наследуем код (и должность) от базового

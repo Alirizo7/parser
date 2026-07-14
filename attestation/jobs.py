@@ -80,10 +80,15 @@ def generate_documents(batch_id: int) -> None:
         p65 = render.render_6_5(
             batch.company_data, batch.extracted_data, out_dir / "6_5.docx", lang=lang
         )
+        doc_warnings: list[str] = []
         p64 = render.render_6_4(
-            batch.company_data, batch.extracted_data, out_dir / "6_4.docx", lang=lang
+            batch.company_data, batch.extracted_data, out_dir / "6_4.docx", lang=lang,
+            warnings=doc_warnings,
         )
         media_root = Path(settings.MEDIA_ROOT)
+        error = batch.error or ""
+        if doc_warnings:
+            error = "\n".join(filter(None, [error, *doc_warnings]))
         _set(
             batch_id,
             status=Batch.Status.DONE,
@@ -91,7 +96,7 @@ def generate_documents(batch_id: int) -> None:
             output_5_1b=str(Path(p5).relative_to(media_root)),
             output_6_5=str(Path(p65).relative_to(media_root)),
             output_6_4=str(Path(p64).relative_to(media_root)),
-            error="",
+            error=error,
         )
     except Exception as exc:  # noqa: BLE001
         _set(batch_id, status=Batch.Status.FAILED, stage="Ошибка", error=str(exc))
