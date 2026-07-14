@@ -84,7 +84,7 @@ _workplace_sort_key = E.workplace_sort_key
 _SUFFIX_COPY_FIELDS = (
     "factors", "substances", "benefits", "ppe_provided",
     "injury_risk", "privileged_pension", "employees_count", "female_count",
-    "injury_risk_class_6_4", "ppe_status_6_4",
+    "injury_risk_class_6_4", "ppe_status_6_4", "ppe_not_envisaged_6_4",
 )
 
 
