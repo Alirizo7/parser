@@ -49,6 +49,7 @@ class Batch(models.Model):
     # Пути к сгенерированным документам (относительно MEDIA_ROOT)
     output_5_1b = models.CharField("Документ 5_1б", max_length=512, blank=True, default="")
     output_6_5 = models.CharField("Документ 6_5", max_length=512, blank=True, default="")
+    output_6_4 = models.CharField("Документ 6_4", max_length=512, blank=True, default="")
 
     class Meta:
         verbose_name = "Батч"

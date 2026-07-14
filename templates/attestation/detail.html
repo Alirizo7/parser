@@ -30,7 +30,7 @@
 {% else %}
 
   {% if batch.status == 'done' %}
-  <div class="mb-6 grid gap-4 sm:grid-cols-2">
+  <div class="mb-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
     <div class="flex items-center justify-between rounded-xl border border-emerald-200 bg-emerald-50/50 p-5">
       <div>
         <p class="text-xs font-medium uppercase tracking-wide text-emerald-700">Документ</p>
@@ -45,6 +45,14 @@
         <p class="mt-1 font-semibold text-slate-900">6_5 — сводное заключение</p>
       </div>
       <a href="{% url 'attestation:download' batch.pk '6_5' %}"
+         class="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700">Скачать .docx</a>
+    </div>
+    <div class="flex items-center justify-between rounded-xl border border-emerald-200 bg-emerald-50/50 p-5">
+      <div>
+        <p class="text-xs font-medium uppercase tracking-wide text-emerald-700">Документ</p>
+        <p class="mt-1 font-semibold text-slate-900">6_4 — йиғма қайднома (итоги по бўлимлар)</p>
+      </div>
+      <a href="{% url 'attestation:download' batch.pk '6_4' %}"
          class="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700">Скачать .docx</a>
     </div>
   </div>

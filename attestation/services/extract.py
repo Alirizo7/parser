@@ -35,7 +35,7 @@ from .normalize import (
 # «3_Умумий_...doc», «000004.Bosh mexanik.doc». Имя — лишь запасной источник;
 # номер и должность берём из содержимого документа (имя бывает ненадёжным).
 _CARD_FILENAME_RE = re.compile(
-    r"^\s*(\d+)\s*([а-яёА-ЯЁ]?)\s*[._\-\s]\s*(.+?)\s*\.(?:doc|docx)$", re.IGNORECASE
+    r"^\s*(\d+)\s*([а-яёА-ЯЁ]?)\s*[.,_\-\s]\s*(.+?)\s*\.(?:doc|docx)$", re.IGNORECASE
 )
 
 
@@ -368,12 +368,66 @@ def _extract_workplace_no_from_doc(doc: Doc) -> tuple[str, str]:
     return "", ""
 
 
+def canonical_subdivision(name: str) -> str:
+    """Привести название подразделения к каноничному (см. ``SUBDIVISION_ALIASES``).
+
+    Нужно, чтобы один физический отдел, по-разному названный в разных картах
+    («Рентген кабинет» / «Рентгент бўлими»), в сводной 6_4 стал ОДНИМ блоком.
+    Сопоставление через ``fold`` — регистр/письмо варианта не важны.
+    """
+    f = fold(name)
+    for variant, cyr in M.SUBDIVISION_ALIASES.items():
+        if fold(variant) == f:
+            return cyr
+    return name
+
+
 def _extract_subdivision(doc: Doc) -> str:
     grid = find_table(doc.tables, M.SUBDIVISION_TABLE_ANCHOR)
     if grid is None:
         return ""
     row = find_row(grid, M.SUBDIVISION_ROW_ANCHOR)
-    return row_value_after_label(row, M.SUBDIVISION_ROW_ANCHOR) if row else ""
+    raw = row_value_after_label(row, M.SUBDIVISION_ROW_ANCHOR) if row else ""
+    return canonical_subdivision(raw)
+
+
+def _extract_employee_counts(doc: Doc) -> tuple[str, str]:
+    """(ишловчилар сони, шу жумладан аёллар) из таблицы «Таркибий бўлинма».
+
+    Нужно для 6_4 (сводная қайднома по подразделениям): там строки не только
+    «сколько рабочих мест», но и «сколько на них занято людей» / «из них
+    женщин». Строка гендерной разбивки есть не во всех вариантах карты —
+    тогда возвращаем "" (НЕ "0"), чтобы при агрегации в render_6_4 отличить
+    «неизвестно» от «действительно ноль».
+
+    В основном варианте карты «Ишловчилар сони» и «Аёллар» — ОДНА строка
+    («Ишловчилар сони | 30 | | - | | 30»), а подписи колонок («Иш жойида» /
+    «Барча аналогик иш жойларида» / «Аёллар») — СТРОКОЙ НИЖЕ. Отдельного
+    якоря «жумладан аёллар» в этой строке нет, поэтому берём колонку под
+    подписью «Аёллар» из строки заголовков колонок. «-» в этой колонке —
+    «женщин нет» (настоящий ноль), а не «нет данных», поэтому НЕ используем
+    ``last_value`` (он трактует «-» как пусто и пропускает такую колонку).
+    """
+    grid = find_table(doc.tables, M.SUBDIVISION_TABLE_ANCHOR)
+    if grid is None:
+        return "", ""
+    workers_row = find_row(grid, M.WORKERS_ROW_ANCHOR)
+    workers = normalize_number(row_value_after_label(workers_row, M.WORKERS_ROW_ANCHOR)) if workers_row else ""
+
+    female_row = find_row(grid, M.WORKERS_FEMALE_ROW_ANCHOR)
+    if female_row:
+        female = normalize_number(row_value_after_label(female_row, M.WORKERS_FEMALE_ROW_ANCHOR))
+    else:
+        female = ""
+        if workers_row:
+            idx = grid.index(workers_row)
+            header_row = grid[idx + 1] if idx + 1 < len(grid) else None
+            if header_row:
+                for i, cell in enumerate(header_row):
+                    if _contains(cell, M.WORKERS_FEMALE_COL_ANCHOR) and i < len(workers_row):
+                        female = normalize_number(workers_row[i])
+                        break
+    return workers, female
 
 
 # ---------------------------------------------------------------------------
@@ -404,6 +458,103 @@ def _extract_ppe(doc: Doc) -> str:
             if not is_empty(c) and canon_yesno(c) == "ҳа":
                 has_ppe = True
     return "ҳа" if has_ppe else "йўқ"
+
+
+# --- 6_4: реальные итоговые показатели (см. mapping.INJURY_RISK_CLASS_ANCHORS
+# / PPE_ANSWER_ANCHOR) — НЕ путать с injury_risk/ppe_provided выше: те эвристика
+# и таблица СИЗ соответственно, используются только 5_1б/6_5/экраном ревью.
+_INJURY_CLASS_VALUE_RE = re.compile(r"[_\s]([1-3])[_\s]*(?:дараж|daraja)", re.IGNORECASE)
+
+
+def _extract_injury_risk_class_6_4(doc: Doc) -> str:
+    """Класс травмоопасности из п.2.3 карты («...шикастлаш хавфлилиги
+    бўйича ____N____даражага мансуб») — целое число 1-3. "" если не найден.
+    """
+    for p in doc.paragraphs:
+        if _contains(p, M.INJURY_RISK_CLASS_ANCHORS[0]) and _contains(p, M.INJURY_RISK_CLASS_ANCHORS[1]):
+            m = _INJURY_CLASS_VALUE_RE.search(p)
+            if m:
+                return m.group(1)
+    return ""
+
+
+_FOLD_YES_TOKENS = {"ha", "bor", "xa", "da", "yes"}
+_FOLD_NO_TOKENS = {"yoq", "yuq", "yok", "no"}
+
+
+def _fold_yesno_token(text: str) -> str:
+    """«ha»/«йўқ»-подобный токен → 'ha'/'yoq'; иначе "" (не распознано)."""
+    f = fold(text)
+    if f in _FOLD_YES_TOKENS:
+        return "ha"
+    if f in _FOLD_NO_TOKENS:
+        return "yoq"
+    return ""
+
+
+def _extract_ppe_status_6_4(doc: Doc) -> str:
+    """Статус ЯТҲВ из п.3.3 карты: 'mos' / 'mos_emas' / 'kutilmagan'.
+
+    П.3.3 в этом шаблоне карты — УТВЕРЖДЕНИЕ: «Иш жойи ЯТҲВ билан
+    таъминланганлик талабларига жавоб беради» («…ОТВЕЧАЕТ требованиям»). Это
+    статичный текст без переменной ha/yo'q — сам факт его наличия означает
+    «Мос» (соответствует). Проверено на эталоне клиента: колонка «Мос» = 100%
+    рабочих мест по всем подразделениям, «Мос эмас» = 0. Прежняя трактовка
+    «нет ответа → Ятҳв кўзда тутилмаган» была ошибкой (утверждение читалось как
+    незаполненное поле); ещё более ранняя ошибка — брать ha/yo'q из раздела IV
+    (льготы/пенсия), к обеспеченности СИЗ отношения не имеющего.
+
+    Если в конкретной карте после текста п.3.3 всё же вписан явный ответ
+    (инлайн или в одном из следующих 2 абзацев, до раздела IV «Кафолатлар»),
+    он имеет приоритет: ha → 'mos', yo'q → 'mos_emas'. 'kutilmagan' остаётся
+    лишь для карт, где раздела 3.3 вовсе нет (обеспеченность СИЗ не оценивалась).
+    """
+    paras = doc.paragraphs
+    for i, p in enumerate(paras):
+        if not _contains(p, M.PPE_ANSWER_ANCHOR):
+            continue
+        fp, fa = fold(p), fold(M.PPE_ANSWER_ANCHOR)
+        tail = fp.split(fa, 1)[1] if fa in fp else ""
+        answer = _fold_yesno_token(tail)
+        if not answer:
+            for cand in paras[i + 1:i + 3]:
+                if is_empty(cand):
+                    continue
+                if _contains(cand, M.PPE_NEXT_SECTION_STOP_ANCHOR):
+                    break
+                answer = _fold_yesno_token(cand)
+                break
+        if answer == "yoq":
+            return "mos_emas"
+        # Явный «ha» ИЛИ статичное утверждение п.3.3 без переменной → «Мос».
+        return "mos"
+    return "kutilmagan"
+
+
+def _extract_ppe_not_envisaged_6_4(doc: Doc) -> bool:
+    """«Ятҳв кўзда тутилмаган» (СИЗ не предусмотрены) — из таблицы СИЗ (п.3.2).
+
+    В таблице СИЗ наименование каждого средства — во 2-й колонке. Если для
+    рабочего места СИЗ не предусмотрены, вместо названий во всех строках стоит
+    literal «Кўзда тутилмаган», т.е. НЕТ ни одного реального наименования СИЗ.
+    Тогда место идёт в колонку c11 сводной 6_4 «Ятҳв кўзда тутилмаган».
+
+    Это НЕЗАВИСИМАЯ от «Мос/Мос эмас» (п.3.3) величина: рабочее место может быть
+    одновременно «Мос» (формально соответствует требованиям) и «кўзда тутилмаган»
+    (СИЗ не предусмотрены). Сверено с эталоном клиента: колонка «кўзда» = 93 по
+    компании при «Мос» = 114 (все) — суммы намеренно пересекаются.
+    """
+    grid = find_table(doc.tables, M.PPE_TABLE_ANCHOR)
+    if grid is None:
+        return False
+    for row in grid[1:]:  # пропускаем шапку
+        name = normalize_spaces(row[1]) if len(row) > 1 else ""
+        if not name or name.endswith(":"):
+            continue  # категория «Мажбурий:» / «Қўшимча:», не наименование СИЗ
+        if fold_contains(name, M.PPE_NOT_ENVISAGED_MARKER):
+            continue  # «Кўзда тутилмаган» — СИЗ нет
+        return False  # найдено реальное наименование СИЗ → предусмотрены
+    return True  # реальных СИЗ в таблице нет → «кўзда тутилмаган»
 
 
 def _extract_benefits(doc: Doc) -> dict:
@@ -502,12 +653,27 @@ def extract_card(docx_path: str | Path, basename: str) -> dict:
     medical = is_medical(position, subdivision)
     injury_risk = _injury_risk(medical)
     pension = _extract_pension(doc)
+    employees_count, female_count = _extract_employee_counts(doc)
+
+    # 6_4-специфичные показатели (см. Шаг 4 спецификации) — читаются НАПРЯМУЮ
+    # из карты, независимо от injury_risk/ppe_provided выше (те эвристика/
+    # таблица СИЗ для 5_1б/6_5, менять их поведение не нужно).
+    injury_risk_class_6_4 = _extract_injury_risk_class_6_4(doc)
+    ppe_status_6_4 = _extract_ppe_status_6_4(doc)
+    ppe_not_envisaged_6_4 = _extract_ppe_not_envisaged_6_4(doc)
 
     # Флаги для подсветки в UI (поля, требующие проверки оператором)
     flags: list[str] = []
     if not factors.get("overall") or factors.get("overall") == "-":
         flags.append("overall_missing")
     flags.append("injury_risk_heuristic")     # травмоопасность (c18) — эвристика
+    if not employees_count:
+        # Нет строки «ишловчилар сони» в карте — считаем минимум 1 (карта
+        # описывает занятое рабочее место), но подсвечиваем для проверки.
+        employees_count = "1"
+        flags.append("employees_count_missing")
+    if not female_count:
+        flags.append("female_count_missing")  # нужно для 6_4; см. mapping.WORKERS_FEMALE_ROW_ANCHOR
 
     return {
         "workplace_no": workplace_no,
@@ -523,6 +689,11 @@ def extract_card(docx_path: str | Path, basename: str) -> dict:
         "benefits": benefits,
         "injury_risk": injury_risk,
         "privileged_pension": pension,
+        "employees_count": employees_count,
+        "female_count": female_count,
+        "injury_risk_class_6_4": injury_risk_class_6_4,
+        "ppe_status_6_4": ppe_status_6_4,
+        "ppe_not_envisaged_6_4": ppe_not_envisaged_6_4,
         "flags": flags,
     }
 
@@ -530,6 +701,35 @@ def extract_card(docx_path: str | Path, basename: str) -> dict:
 # ---------------------------------------------------------------------------
 # Разбор «Перечня» — источник кода должности (и сверка должности)
 # ---------------------------------------------------------------------------
+_PERECHEN_WP_RE = re.compile(r"^\d{4,6}[а-яёА-ЯЁ]?$")
+
+
+def _perechen_header_columns(grid: list[list[str]]) -> dict[str, int]:
+    """Индексы колонок Перечня по объединённому заголовку (строки 0–3)."""
+    ncols = max(len(r) for r in grid) if grid else 0
+    header = [" ".join(grid[r][c] if c < len(grid[r]) else "" for r in range(min(4, len(grid))))
+              for c in range(ncols)]
+    cols: dict[str, int] = {}
+    for i, h in enumerate(header):
+        hl = h.lower()
+        if "code" not in cols and M.PERECHEN_COL_CODE in hl:
+            cols["code"] = i
+        if "workplace" not in cols and M.PERECHEN_COL_WORKPLACE in hl:
+            cols["workplace"] = i
+        if "position" not in cols and M.PERECHEN_COL_POSITION in hl and M.PERECHEN_COL_CODE not in hl:
+            cols["position"] = i
+        if "workers" not in cols and M.PERECHEN_COL_WORKERS in hl:
+            cols["workers"] = i
+        if "female" not in cols and M.PERECHEN_COL_FEMALE in hl and M.PERECHEN_COL_WORKERS not in hl:
+            cols["female"] = i
+    cols.setdefault("workplace", 0)
+    cols.setdefault("position", 1)
+    cols.setdefault("code", 2)
+    cols.setdefault("workers", 3)
+    cols.setdefault("female", 4)
+    return cols
+
+
 def parse_perechen(docx_path: str | Path) -> dict[str, dict]:
     """Вернуть {workplace_no: {'job_code', 'position'}} из «Перечня»."""
     doc = read_docx(docx_path)
@@ -537,34 +737,62 @@ def parse_perechen(docx_path: str | Path) -> dict[str, dict]:
     if not grid:
         return {}
 
-    # Определяем колонки по объединённому заголовку (строки 0–3)
-    header = [" ".join(grid[r][c] if c < len(grid[r]) else "" for r in range(min(4, len(grid))))
-              for c in range(max(len(r) for r in grid))]
-    code_col = position_col = workplace_col = None
-    for i, h in enumerate(header):
-        hl = h.lower()
-        if code_col is None and M.PERECHEN_COL_CODE in hl:
-            code_col = i
-        if workplace_col is None and M.PERECHEN_COL_WORKPLACE in hl:
-            workplace_col = i
-        if position_col is None and M.PERECHEN_COL_POSITION in hl and M.PERECHEN_COL_CODE not in hl:
-            position_col = i
-    if workplace_col is None:
-        workplace_col = 0
-    if position_col is None:
-        position_col = 1
-    if code_col is None:
-        code_col = 2
+    cols = _perechen_header_columns(grid)
+    workplace_col, position_col, code_col = cols["workplace"], cols["position"], cols["code"]
 
     result: dict[str, dict] = {}
     for row in grid:
         if workplace_col >= len(row):
             continue
         wp = normalize_spaces(row[workplace_col])
-        if not re.match(r"^\d{4,6}[а-яёА-ЯЁ]?$", wp):
+        if not _PERECHEN_WP_RE.match(wp):
             continue
         result[wp] = {
             "job_code": normalize_spaces(row[code_col]) if code_col < len(row) else "",
             "position": normalize_spaces(row[position_col]) if position_col < len(row) else "",
         }
     return result
+
+
+# --- 6_4: позиции Перечня с привязкой к подразделению (строки-разделители) --
+def parse_perechen_positions_6_4(docx_path: str | Path) -> tuple[list[dict], list[str]]:
+    """Вернуть позиции Перечня по порядку документа для сборки 6_4.
+
+    Каждая позиция: ``{workplace_no, subdivision, employees_count,
+    female_count}``. Подразделение определяется строками-разделителями —
+    НАСТОЯЩИМИ горизонтальными слияниями ячеек на всю ширину таблицы (все
+    ячейки строки указывают на один и тот же ``<w:tc>``), а не эвристикой по
+    тексту — это надёжно отличает их от обычных строк данных независимо от
+    формулировки названия подразделения (см. Шаг 2 спецификации). Повторы
+    одного номера (напр. две карты одной "а"-позиции на разные смены)
+    сохраняются как отдельные позиции, не схлопываются в одну (Шаг 3/5).
+    """
+    document = Document(str(docx_path))
+    warnings: list[str] = []
+    table = max(document.tables, key=lambda t: len(t.rows), default=None)
+    if table is None:
+        return [], ["«Перечень»: таблица позиций не найдена (6_4)."]
+
+    grid = [[normalize_spaces(c.text) for c in row.cells] for row in table.rows]
+    cols = _perechen_header_columns(grid)
+    workplace_col, workers_col, female_col = cols["workplace"], cols["workers"], cols["female"]
+
+    positions: list[dict] = []
+    current_sub = ""
+    for row in table.rows:
+        cells = row.cells
+        text0 = normalize_spaces(cells[0].text) if cells else ""
+        is_merged_full_row = len({id(c._tc) for c in cells}) == 1
+        if is_merged_full_row and text0 and not _PERECHEN_WP_RE.match(text0):
+            current_sub = text0
+            continue
+        wp = normalize_spaces(cells[workplace_col].text) if workplace_col < len(cells) else ""
+        if not _PERECHEN_WP_RE.match(wp):
+            continue
+        positions.append({
+            "workplace_no": wp,
+            "subdivision": current_sub,
+            "employees_count": normalize_number(cells[workers_col].text) if workers_col < len(cells) else "",
+            "female_count": normalize_number(cells[female_col].text) if female_col < len(cells) else "",
+        })
+    return positions, warnings
