@@ -10,5 +10,10 @@ staticfiles/
 db.sqlite3
 *.zip
 *.doc
+*.rar
+excel_templates/
 *.docx
 !attestation/assets/*.docx
+# `**/*` — иначе шаблон ловит только корень; ассеты возвращаем исключением
+**/*.xlsx
+!attestation/assets/*.xlsx

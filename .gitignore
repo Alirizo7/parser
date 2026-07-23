@@ -17,9 +17,13 @@ db.sqlite3
 /карты/
 
 # Тестовые фикстуры для selfcheck: держим локально, но не коммитим (крупные бинарники)
-# assets/*.docx остаются в гите — они не .doc и не .zip
+# assets/*.docx и assets/*.xlsx остаются в гите — они не .doc/.zip/.rar и не в excel_templates/
 *.zip
 *.doc
+*.rar
+# Эталоны Excel-протоколов (данные клиента, как .doc-эталоны) — только локально;
+# пустые шаблоны-ассеты в attestation/assets/ коммитим (собираются из них).
+/excel_templates/
 
 # Dev-заметки / промпты
 /claude_code_prompt.md

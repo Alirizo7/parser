@@ -13,14 +13,18 @@ from pathlib import Path
 from docx import Document
 from docx.table import Table
 
+from openpyxl import load_workbook
+
 from . import mapping as M
+from . import xlsx
 from .extract import split_workplace_no, workplace_sort_key
-from .normalize import _to_int, fold, fold_contains, normalize_spaces, to_latin
+from .normalize import _to_int, fold, fold_contains, max_class, normalize_spaces, to_latin
 
 ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
 TEMPLATE_5_1B = ASSETS_DIR / "template_5_1b.docx"
 TEMPLATE_6_5 = ASSETS_DIR / "template_6_5.docx"
 TEMPLATE_6_4 = ASSETS_DIR / "template_6_4.docx"
+TEMPLATE_EXCEL = {n: ASSETS_DIR / f"template_excel_{n}.xlsx" for n in range(1, 6)}
 
 
 def _transliterate_doc(doc, lang: str) -> None:
@@ -477,3 +481,375 @@ def render_6_4(company_data: dict, workplaces: list[dict], out_path: str | Path,
     out_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(out_path))
     return out_path
+
+
+# ===========================================================================
+# Excel-протоколы лабораторных замеров (5 файлов) — render_excel_1..5
+# ===========================================================================
+# Тело каждого протокола генерируется из единого датасета клонированием прото-
+# блока рабочего места (см. services/xlsx.py). Управляемая часть ассета держится
+# на письме эталона (латиница); в конце приводится к output_lang «к целевому
+# письму» (xlsx.transliterate_region). Статичная шапка (приборы/НД/лаборатория) —
+# «как есть», меняется только заказчик (company_data).
+
+# Геометрия ассетов (совпадает с build_excel_assets.CFG). ncols — число колонок.
+EXCEL_CFG = {
+    1: dict(ncols=12, managed_start=27, group_row=30, block_start=31, block_len=1),
+    2: dict(ncols=11, managed_start=27, group_row=30, block_start=31, block_len=4),
+    3: dict(ncols=11, managed_start=24, group_row=27, block_start=28, block_len=9),
+    4: dict(ncols=11, managed_start=24, group_row=27, block_start=28, block_len=5),
+    5: dict(ncols=11, managed_start=24, group_row=None, block_start=28, block_len=16),
+}
+
+# Метки строки-заказчика в шапке (двуязычные: файл 1 — узб. латиница, 2–5 — рус.)
+_EXCEL_REQS_NAME = ("buyurtmachi nomi", "наименование заказчик")
+_EXCEL_REQS_ADDR = ("buyurtmachi manzil", "адрес заказчик")
+
+
+def _fill_excel_reqs(ws, company: dict) -> None:
+    """Вписать имя/адрес заказчика в шапку (перезаписать метку-строку).
+
+    Значение идёт ИНЛАЙН после метки в той же ячейке («Наименование заказчика:
+    <имя>»); длинное имя в эталоне переносится на следующую строку — её очищаем,
+    чтобы имя компании-образца не «протекло» (анти-утечка, как в docx _fill_reqs).
+    """
+    company = company or {}
+    name_row = None
+    for r in range(1, EXCEL_HEADER_SCAN + 1):
+        cell = ws.cell(row=r, column=1)
+        v = cell.value
+        if not isinstance(v, str):
+            continue
+        if any(fold_contains(v, a) for a in _EXCEL_REQS_NAME):
+            cell.value = _reqs_prefix(v) + (company.get("name", "") or "")
+            name_row = r
+        elif any(fold_contains(v, a) for a in _EXCEL_REQS_ADDR):
+            cell.value = _reqs_prefix(v) + (company.get("address", "") or "")
+    # Очистить строку-продолжение длинного имени образца (анти-утечка), но НЕ
+    # трогать её, если это уже другая метка (адрес и т.п. — имя было в одну строку).
+    if name_row is not None:
+        cont = ws.cell(row=name_row + 1, column=1)
+        cv = cont.value
+        is_label = isinstance(cv, str) and any(
+            fold_contains(cv, a) for a in (*_EXCEL_REQS_NAME, *_EXCEL_REQS_ADDR)
+        )
+        if not is_label:
+            cont.value = None
+
+
+EXCEL_HEADER_SCAN = 26  # в пределах скольких строк искать метки заказчика
+
+
+def _reqs_prefix(text: str) -> str:
+    """Префикс метки до двоеточия включительно («Наименование заказчика: »)."""
+    return (text.split(":", 1)[0] + ": ") if ":" in text else (text + " ")
+
+
+# --- Преобразование значений замеров в ячейки -------------------------------
+def _d_norma(value):
+    """Норма в колонку D: число / диапазон-строка / «-»; пусто → None."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    if s == "":
+        return None
+    if s == "-":
+        return "-"
+    return xlsx.to_number(s)
+
+
+def _cls_cell(value):
+    """Класс в ячейку: число (2.0→2, 3.1→3.1); «-»/пусто → None."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    if s in ("", "-"):
+        return None
+    return xlsx.to_number(s)
+
+
+# Колонки D..J (норма, 1/2/3-фаолият, факт, время, класс) для файлов 2–5
+_DJ_COLS = range(4, 11)
+
+
+def _measure_fill(m: dict | None, *, with_class: bool = True) -> dict:
+    """Заполнение колонок D..J под-строки по замеру {norma,actual,time,cls}.
+
+    * замера нет → пустая рамка (D..J очищены);
+    * факт-текст «йўқ» → псевдозамеры E/F/G и факт H = тот же текст, время/класс пусты;
+    * числовой факт → норма в D, факт в H, формулы E/F/G из прото (KEEP), время/класс.
+
+    ``with_class=False`` — не выводить класс (J): в некоторых под-строках эталон
+    его не сообщает (напр. естественная освещённость КЕО в файле 4).
+    """
+    if not m:
+        return {c: xlsx.CLEAR for c in _DJ_COLS}
+    actual = xlsx.to_number(m.get("actual"))
+    if actual is None:
+        return {c: xlsx.CLEAR for c in _DJ_COLS}
+    d = _d_norma(m.get("norma"))
+    if isinstance(actual, str):  # факт — текст «йўқ»
+        return {4: d, 5: actual, 6: actual, 7: actual, 8: actual, 9: xlsx.CLEAR, 10: xlsx.CLEAR}
+    cls = _cls_cell(m.get("cls")) if with_class else xlsx.CLEAR
+    return {4: d, 5: xlsx.KEEP, 6: xlsx.KEEP, 7: xlsx.KEEP, 8: actual,
+            9: xlsx.to_number(m.get("time")), 10: cls}
+
+
+def _label_d_fill(text: str) -> dict:
+    """Под-строка «метка в D, остальное пусто» (Ishlar toifasi / Vizual ish / энергия)."""
+    fill = {c: xlsx.CLEAR for c in _DJ_COLS}
+    if text:
+        fill[4] = text
+    return fill
+
+
+# --- Построители под-строк блока (файлы 2–5) --------------------------------
+def _subrows_file2(wp: dict) -> list[dict]:
+    pm = wp.get("physical_measurements") or {}
+    return [
+        _measure_fill(pm.get("noise")),
+        _measure_fill(pm.get("vibration_local")),
+        _measure_fill(pm.get("vibration_general")),
+        _measure_fill(pm.get("infrasound")),
+    ]
+
+
+def _subrows_file3(wp: dict) -> list[dict]:
+    mc = wp.get("microclimate_measurements") or {}
+    return [
+        _label_d_fill(""),                       # 0 энергозатраты (только K=итог)
+        _label_d_fill(mc.get("category_label") or ""),  # 1 Ishlar toifasi
+        _measure_fill(mc.get("temp")),           # 2 температура
+        _measure_fill(mc.get("air_speed")),      # 3 скорость воздуха
+        _measure_fill(mc.get("humidity")),       # 4 влажность
+        _measure_fill(mc.get("heat_radiation")), # 5 теплоизлучение («йўқ»)
+        _label_d_fill(""),                       # 6 температура (откр. территория)
+        _label_d_fill(""),                       # 7 WBGT
+        _label_d_fill(""),                       # 8 средняя тепл. нагрузка TNS
+    ]
+
+
+def _subrows_file4(wp: dict) -> list[dict]:
+    lg = wp.get("lighting_measurements") or {}
+    return [
+        _label_d_fill(lg.get("discharge") or ""),          # 0 разряд зрит. работ
+        _measure_fill(lg.get("natural"), with_class=False),  # 1 естественная (КЕО): без класса
+        _measure_fill(lg.get("combined")),                 # 2 смешанная (КЕО)
+        _measure_fill(lg.get("artificial")),               # 3 искусственная (лк)
+        # 4 пульсация: эталон систематически НЕ сообщает её в этом протоколе
+        # (0/52 РМ), хотя в картах раздел 1.11.6 заполнен — оставляем пустой рамкой,
+        # чтобы вывод совпал с эталоном по данным.
+        _measure_fill(None),
+    ]
+
+
+# Файл 5: 16 под-строк; данные конкретной 1.4.x лежат в верхней строке пары.
+# ⚠️ Прото-формулы псевдозамеров (E/F/G = H±0.01) есть в эталоне ТОЛЬКО на строке
+# 1.4.10 (единственной заполненной у медиков). Если у клиента заполнен другой
+# раздел (1.4.1–1.4.9), его норма/факт/время/класс выводятся корректно, но
+# декоративные колонки «1/2/3-фаолият» останутся пустыми (в прото-строке формулы
+# нет). Данные при этом не теряются; при появлении таких клиентов формулы можно
+# до-синтезировать. То же касается пульсации в файле 4.
+_EM_SUBROW_SECTION = {
+    0: "1.4.1", 1: "1.4.2", 2: "1.4.3", 3: "1.4.4", 4: "1.4.5",
+    6: "1.4.6", 8: "1.4.7", 10: "1.4.8", 12: "1.4.9", 14: "1.4.10",
+}
+
+
+def _subrows_file5(wp: dict) -> list[dict]:
+    em = wp.get("em_measurements") or {}
+    fills = []
+    for i in range(16):
+        sec = _EM_SUBROW_SECTION.get(i)
+        fills.append(_measure_fill(em.get(sec)) if sec else _label_d_fill(""))
+    return fills
+
+
+# --- Итоговый класс (K/L) по файлу ------------------------------------------
+def _factor(wp: dict, key: str) -> str:
+    return (wp.get("factors") or {}).get(key, "-") or "-"
+
+
+def _final_file1(wp):
+    return _cls_cell(_factor(wp, "chem"))
+
+
+def _final_file2(wp):
+    phys = [_factor(wp, k) for k in
+            ("noise", "infrasound", "ultrasound_air", "vibration_general", "vibration_local")]
+    return _cls_cell(max_class(phys))
+
+
+def _final_file3(wp):
+    return _cls_cell(_factor(wp, "microclimate"))
+
+
+def _final_file4(wp):
+    return _cls_cell(_factor(wp, "lighting"))
+
+
+def _final_file5(wp):
+    return _cls_cell(_factor(wp, "em_field"))
+
+
+def _has_em(wp: dict) -> bool:
+    return any(v for v in (wp.get("em_measurements") or {}).values())
+
+
+# --- Общий рендер файлов 2–5 (фикс. блок из N под-строк) --------------------
+def _render_excel_blocks(company_data, workplaces, out_path, *, idx, subrows_of,
+                         final_of, include, grouped, lang):
+    cfg = EXCEL_CFG[idx]
+    ncols, gr, bs, blen = cfg["ncols"], cfg["group_row"], cfg["block_start"], cfg["block_len"]
+    wb = load_workbook(str(TEMPLATE_EXCEL[idx]))
+    ws = wb["complete"]
+
+    # Снять прототипы ДО очистки тела
+    group_proto = xlsx.capture_row(ws, gr, ncols) if gr else None
+    group_merges = xlsx.capture_merges(ws, gr, gr) if gr else []
+    block_proto = [xlsx.capture_row(ws, bs + i, ncols) for i in range(blen)]
+    block_merges = xlsx.capture_merges(ws, bs, bs + blen - 1)
+
+    body_start = gr if gr else bs
+    xlsx.clear_body(ws, body_start)
+    _fill_excel_reqs(ws, company_data)
+
+    wps = [w for w in sorted(workplaces, key=lambda w: workplace_sort_key(w.get("workplace_no", "")))
+           if include(w)]
+
+    cur = body_start
+
+    def emit_block(wp):
+        nonlocal cur
+        fills = subrows_of(wp)
+        start = cur
+        for i in range(blen):
+            f = dict(fills[i])
+            if i == 0:  # № РМ, должность, итоговый класс — только 1-я строка (merge)
+                f[1] = wp.get("workplace_no", "")
+                f[2] = wp.get("position_from_perechen") or wp.get("position", "")
+                f[ncols] = final_of(wp)
+            xlsx.emit_row(ws, cur, block_proto[i], ncols, f)
+            cur += 1
+        xlsx.apply_merges(ws, block_merges, start)  # A/B/K спаны + внутренние объединения
+
+    if grouped:
+        for sub, members in _group_by_subdivision(wps):
+            xlsx.emit_row(ws, cur, group_proto, ncols, {1: sub})
+            grow = cur
+            cur += 1
+            xlsx.apply_merges(ws, group_merges, grow)
+            for wp in members:
+                emit_block(wp)
+    else:
+        for wp in wps:
+            emit_block(wp)
+
+    xlsx.transliterate_region(ws, lang, cfg["managed_start"])
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(str(out_path))
+    return out_path
+
+
+def render_excel_1(company_data, workplaces, out_path, *,
+                   template_path=None, lang: str = "cyr") -> Path:
+    """Файл 1 — вредные вещества (одна строка на вещество, блок переменной высоты)."""
+    cfg = EXCEL_CFG[1]
+    ncols, gr, bs = cfg["ncols"], cfg["group_row"], cfg["block_start"]
+    wb = load_workbook(str(TEMPLATE_EXCEL[1]))
+    ws = wb["complete"]
+
+    group_proto = xlsx.capture_row(ws, gr, ncols)
+    group_merges = xlsx.capture_merges(ws, gr, gr)      # A30:L30
+    sub_proto = xlsx.capture_row(ws, bs, ncols)         # одна прото-строка вещества
+
+    xlsx.clear_body(ws, gr)
+    _fill_excel_reqs(ws, company_data)
+
+    wps = sorted(workplaces, key=lambda w: workplace_sort_key(w.get("workplace_no", "")))
+    cur = gr
+
+    for sub, members in _group_by_subdivision(wps):
+        xlsx.emit_row(ws, cur, group_proto, ncols, {1: sub})
+        grow = cur
+        cur += 1
+        xlsx.apply_merges(ws, group_merges, grow)
+        for wp in members:
+            subs = wp.get("substances") or []
+            position = wp.get("position_from_perechen") or wp.get("position", "")
+            final = _final_file1(wp)
+            start = cur
+            if not subs:  # РМ без веществ — одна пустая строка (не теряем место)
+                xlsx.emit_row(ws, cur, sub_proto, ncols, {
+                    1: wp.get("workplace_no", ""), 2: position, 3: xlsx.CLEAR,
+                    4: xlsx.CLEAR, 5: xlsx.CLEAR, 6: xlsx.CLEAR, 7: xlsx.CLEAR,
+                    8: xlsx.CLEAR, 9: xlsx.CLEAR, 10: xlsx.CLEAR, 11: xlsx.CLEAR, 12: final,
+                })
+                cur += 1
+            for si, s in enumerate(subs):
+                actual = xlsx.to_number(s.get("actual"))  # I — факт (число или текст)
+                if isinstance(actual, str):
+                    # Факт — текст («йўқ» и т.п.): НЕ оставляем формулы «=I±шаг» на
+                    # текстовой ячейке (иначе Excel даст #VALUE!) — как _measure_fill
+                    # для файлов 2–5: псевдозамеры F/G/H = тот же текст.
+                    pseudo = {6: actual, 7: actual, 8: actual}
+                else:
+                    pseudo = {6: xlsx.KEEP, 7: xlsx.KEEP, 8: xlsx.KEEP}  # формулы =I±шаг
+                f = {
+                    3: s.get("name", ""),           # C — вещество
+                    4: xlsx.CLEAR,                  # D — класс опасности (нет в карте)
+                    5: _d_norma(s.get("norma")),    # E — ПДК/норма
+                    **pseudo,                       # F/G/H
+                    9: actual,                      # I — факт
+                    10: xlsx.to_number(s.get("pct")),  # J — время
+                    11: _cls_cell(s.get("cls")),       # K — класс вещества
+                }
+                if si == 0:
+                    f[1] = wp.get("workplace_no", "")
+                    f[2] = position
+                    f[12] = final              # L — итог по РМ
+                else:
+                    f[1] = xlsx.CLEAR
+                    f[2] = xlsx.CLEAR
+                    f[12] = xlsx.CLEAR
+                xlsx.emit_row(ws, cur, sub_proto, ncols, f)
+                cur += 1
+            # Вертикальные объединения № РМ / должность / итог по высоте блока
+            xlsx.merge_span(ws, start, cur - 1, 1)
+            xlsx.merge_span(ws, start, cur - 1, 2)
+            xlsx.merge_span(ws, start, cur - 1, 12)
+
+    xlsx.transliterate_region(ws, lang, cfg["managed_start"])
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(str(out_path))
+    return out_path
+
+
+def render_excel_2(company_data, workplaces, out_path, *, template_path=None, lang="cyr") -> Path:
+    """Файл 2 — физические факторы (шум/вибрация/инфразвук)."""
+    return _render_excel_blocks(company_data, workplaces, out_path, idx=2,
+                                subrows_of=_subrows_file2, final_of=_final_file2,
+                                include=lambda w: True, grouped=True, lang=lang)
+
+
+def render_excel_3(company_data, workplaces, out_path, *, template_path=None, lang="cyr") -> Path:
+    """Файл 3 — микроклимат."""
+    return _render_excel_blocks(company_data, workplaces, out_path, idx=3,
+                                subrows_of=_subrows_file3, final_of=_final_file3,
+                                include=lambda w: True, grouped=True, lang=lang)
+
+
+def render_excel_4(company_data, workplaces, out_path, *, template_path=None, lang="cyr") -> Path:
+    """Файл 4 — освещённость."""
+    return _render_excel_blocks(company_data, workplaces, out_path, idx=4,
+                                subrows_of=_subrows_file4, final_of=_final_file4,
+                                include=lambda w: True, grouped=True, lang=lang)
+
+
+def render_excel_5(company_data, workplaces, out_path, *, template_path=None, lang="cyr") -> Path:
+    """Файл 5 — магнитные поля / ЭМИ (без группировки; только РМ с замером 1.4.x)."""
+    return _render_excel_blocks(company_data, workplaces, out_path, idx=5,
+                                subrows_of=_subrows_file5, final_of=_final_file5,
+                                include=_has_em, grouped=False, lang=lang)
