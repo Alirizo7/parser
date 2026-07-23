@@ -55,6 +55,18 @@
       <a href="{% url 'attestation:download' batch.pk '6_4' %}"
          class="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700">Скачать .docx</a>
     </div>
+
+    {# Пять Excel-протоколов лабораторных замеров #}
+    {% for which, title in excel_docs %}
+    <div class="flex items-center justify-between rounded-xl border border-sky-200 bg-sky-50/50 p-5">
+      <div>
+        <p class="text-xs font-medium uppercase tracking-wide text-sky-700">Протокол замеров</p>
+        <p class="mt-1 font-semibold text-slate-900">{{ title }}</p>
+      </div>
+      <a href="{% url 'attestation:download' batch.pk which %}"
+         class="rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-700">Скачать .xlsx</a>
+    </div>
+    {% endfor %}
   </div>
   {% endif %}
 

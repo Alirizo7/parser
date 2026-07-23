@@ -86,6 +86,18 @@ def generate_documents(batch_id: int) -> None:
             warnings=doc_warnings,
         )
         media_root = Path(settings.MEDIA_ROOT)
+        # Пять Excel-протоколов: сбой одного НЕ должен ронять весь батч и терять
+        # уже готовые docx — рендерим каждый в try, ошибку кладём в warnings.
+        excel_rel: dict[int, str] = {}
+        for n in range(1, 6):
+            try:
+                p = getattr(render, f"render_excel_{n}")(
+                    batch.company_data, batch.extracted_data,
+                    out_dir / f"excel_{n}.xlsx", lang=lang,
+                )
+                excel_rel[n] = str(Path(p).relative_to(media_root))
+            except Exception as exc:  # noqa: BLE001 — не валим docx из-за одного xlsx
+                doc_warnings.append(f"Excel-протокол {n}: ошибка генерации — {exc}")
         error = batch.error or ""
         if doc_warnings:
             error = "\n".join(filter(None, [error, *doc_warnings]))
@@ -96,6 +108,11 @@ def generate_documents(batch_id: int) -> None:
             output_5_1b=str(Path(p5).relative_to(media_root)),
             output_6_5=str(Path(p65).relative_to(media_root)),
             output_6_4=str(Path(p64).relative_to(media_root)),
+            output_excel_1=excel_rel.get(1, ""),
+            output_excel_2=excel_rel.get(2, ""),
+            output_excel_3=excel_rel.get(3, ""),
+            output_excel_4=excel_rel.get(4, ""),
+            output_excel_5=excel_rel.get(5, ""),
             error=error,
         )
     except Exception as exc:  # noqa: BLE001

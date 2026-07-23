@@ -110,9 +110,23 @@ def upload(request):
     return render(request, "attestation/upload.html", {"lang_choices": Batch.OutputLang.choices})
 
 
+# Пять Excel-протоколов: (which для download, поле модели, заголовок карточки)
+EXCEL_DOCS = [
+    ("excel_1", "output_excel_1", "1 — Зарарли моддалар (вредные вещества)"),
+    ("excel_2", "output_excel_2", "2 — Физик омиллар (шум/вибрация/инфразвук)"),
+    ("excel_3", "output_excel_3", "3 — Микроиқлим"),
+    ("excel_4", "output_excel_4", "4 — Ёруғлик (освещённость)"),
+    ("excel_5", "output_excel_5", "5 — Электромагнит майдонлар (ЭМИ)"),
+]
+
+
 def detail(request, pk):
     batch = get_object_or_404(Batch, pk=pk)
-    context = {"batch": batch, "lang_choices": Batch.OutputLang.choices}
+    # Показываем карточку только для реально сформированных протоколов (путь непуст),
+    # чтобы сбой одного рендера не давал битую ссылку-404.
+    excel_docs = [(which, title) for which, attr, title in EXCEL_DOCS if getattr(batch, attr, "")]
+    context = {"batch": batch, "lang_choices": Batch.OutputLang.choices,
+               "excel_docs": excel_docs}
     if batch.status in (Batch.Status.EXTRACTED, Batch.Status.DONE):
         context.update(_review_context(batch))
     return render(request, "attestation/detail.html", context)
@@ -218,6 +232,11 @@ def download(request, pk, which):
         "5_1b": batch.output_5_1b,
         "6_5": batch.output_6_5,
         "6_4": batch.output_6_4,
+        "excel_1": batch.output_excel_1,
+        "excel_2": batch.output_excel_2,
+        "excel_3": batch.output_excel_3,
+        "excel_4": batch.output_excel_4,
+        "excel_5": batch.output_excel_5,
     }.get(which)
     if not rel:
         raise Http404("Документ ещё не сформирован")
@@ -228,5 +247,10 @@ def download(request, pk, which):
         "5_1b": "5_1б.docx",
         "6_5": "6_5_заключение.docx",
         "6_4": "6_4_йиғма_қайднома.docx",
+        "excel_1": "1_Зарарли_моддалар.xlsx",
+        "excel_2": "2_Физик_омиллар.xlsx",
+        "excel_3": "3_Микроиқлим.xlsx",
+        "excel_4": "4_Ёруғлик.xlsx",
+        "excel_5": "5_Электромагнит_майдонлар.xlsx",
     }[which]
     return FileResponse(open(path, "rb"), as_attachment=True, filename=nice)

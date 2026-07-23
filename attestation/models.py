@@ -50,6 +50,12 @@ class Batch(models.Model):
     output_5_1b = models.CharField("Документ 5_1б", max_length=512, blank=True, default="")
     output_6_5 = models.CharField("Документ 6_5", max_length=512, blank=True, default="")
     output_6_4 = models.CharField("Документ 6_4", max_length=512, blank=True, default="")
+    # Пять Excel-протоколов лабораторных замеров (относительно MEDIA_ROOT)
+    output_excel_1 = models.CharField("Протокол 1 (вредные вещества)", max_length=512, blank=True, default="")
+    output_excel_2 = models.CharField("Протокол 2 (физические факторы)", max_length=512, blank=True, default="")
+    output_excel_3 = models.CharField("Протокол 3 (микроклимат)", max_length=512, blank=True, default="")
+    output_excel_4 = models.CharField("Протокол 4 (освещённость)", max_length=512, blank=True, default="")
+    output_excel_5 = models.CharField("Протокол 5 (ЭМИ/магнитные поля)", max_length=512, blank=True, default="")
 
     class Meta:
         verbose_name = "Батч"
