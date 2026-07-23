@@ -216,6 +216,7 @@ class FactorRow:
     actual: str          # «Ҳақиқий даражаси»
     duration: str        # «Таъсир этиш давомийлиги (соат/%)»
     cls: str             # класс (последняя колонка)
+    norm: str = ""       # «Гигиеник меъёр (РЭЧК, РЭЧД)» — норма (для Excel-протоколов)
 
 
 def _find_factor_table(doc: Doc) -> list[list[str]] | None:
@@ -230,10 +231,17 @@ def _find_factor_table(doc: Doc) -> list[list[str]] | None:
     return max(doc.tables, key=len) if doc.tables else None
 
 
-def _factor_columns(grid: list[list[str]]) -> tuple[int, int, int, int]:
-    """Индексы колонок (name, actual, duration, class) по строке-заголовку."""
-    name_col, actual_col, duration_col = 1, 3, 4  # дефолты по подтверждённой раскладке
+def _factor_columns(grid: list[list[str]]) -> tuple[int, int, int, int, int]:
+    """Индексы колонок (name, actual, duration, class, norm) по строке-заголовку.
+
+    ``norm`` (гигиеник меъёр) добавлен для Excel-протоколов лаб. замеров; в
+    подтверждённой раскладке карты это колонка 2 (name=1, norm=2, actual=3,
+    duration=4, class=последняя). Возвращается ПОСЛЕДНИМ, чтобы не сдвигать
+    существующие индексы (в т.ч. class_col=[3]).
+    """
+    name_col, norm_col, actual_col, duration_col = 1, 2, 3, 4  # дефолты по раскладке
     class_col = max(len(r) for r in grid) - 1
+    norm_found = False
     for row in grid[:3]:
         for i, c in enumerate(row):
             if _contains(c, M.FACTOR_HEADER_ACTUAL):
@@ -242,13 +250,17 @@ def _factor_columns(grid: list[list[str]]) -> tuple[int, int, int, int]:
                 duration_col = i
             if _contains(c, "омиллари"):
                 name_col = i
+            # Норма («меъёр») — берём ПЕРВУЮ (левую) такую колонку и фиксируем.
+            if not norm_found and _contains(c, M.FACTOR_HEADER_NORM):
+                norm_col = i
+                norm_found = True
         if any(_contains(c, M.FACTOR_HEADER_CLASS) for c in row):
             class_col = len(row) - 1
-    return name_col, actual_col, duration_col, class_col
+    return name_col, actual_col, duration_col, class_col, norm_col
 
 
 def _parse_factor_rows(grid: list[list[str]]) -> list[FactorRow]:
-    name_col, actual_col, duration_col, class_col = _factor_columns(grid)
+    name_col, actual_col, duration_col, class_col, norm_col = _factor_columns(grid)
     rows: list[FactorRow] = []
     current_section: str | None = None
     for raw in grid:
@@ -270,6 +282,7 @@ def _parse_factor_rows(grid: list[list[str]]) -> list[FactorRow]:
                 actual=cell(actual_col),
                 duration=cell(duration_col),
                 cls=last_value(raw) if class_col >= len(raw) else cell(class_col),
+                norm=cell(norm_col),
             )
         )
     return rows
@@ -319,7 +332,14 @@ def _extract_substances(rows: list[FactorRow]) -> list[dict]:
             name = clean_substance_name(fr.name)
             pct = normalize_number(fr.duration)
             if name:
-                substances.append({"name": name, "pct": pct})
+                # name/pct — для 5_1б (не менять); norma/actual/cls — для Excel-протокола 1.
+                substances.append({
+                    "name": name,
+                    "pct": pct,
+                    "norma": normalize_number(fr.norm),
+                    "actual": normalize_number(fr.actual),
+                    "cls": normalize_class(fr.cls),
+                })
 
     def order_key(item: tuple[int, dict]) -> tuple[int, int]:
         idx, s = item
@@ -327,6 +347,130 @@ def _extract_substances(rows: list[FactorRow]) -> list[dict]:
         return (rank, idx)
 
     return [s for _, s in sorted(enumerate(substances), key=order_key)]
+
+
+# ---------------------------------------------------------------------------
+# Построчные (сырые) замеры для Excel-протоколов лабораторных замеров
+# ---------------------------------------------------------------------------
+# В отличие от factors (подытоги/max-класс по разделам) — здесь берётся ИМЕННО
+# строка нужного раздела карты с её нормой/фактом/временем/классом. Каждый замер:
+#   {"norma", "actual", "time", "cls"}  (строки; норма может быть диапазоном
+#    «23,0-31,0», факт — числом или текстом «йўқ»; «-» = замера нет).
+def _measurement(fr: FactorRow) -> dict:
+    """Замер (норма/факт/время/класс) из строки факторной таблицы."""
+    return {
+        "norma": normalize_number(fr.norm),
+        "actual": normalize_number(fr.actual),
+        "time": normalize_number(fr.duration),
+        "cls": normalize_class(fr.cls),
+    }
+
+
+def _row_by_section(
+    rows: list[FactorRow], section: str, *,
+    prefix: bool = False, need_actual: bool = False, name_anchor: str | None = None,
+) -> FactorRow | None:
+    """Найти строку раздела: exact/prefix-номер, опц. с непустым фактом и якорем имени."""
+    for fr in rows:
+        ok = section_matches(fr.section, section) if prefix else (fr.section == section)
+        if not ok:
+            continue
+        if name_anchor and not fold_contains(fr.name, name_anchor):
+            continue
+        if need_actual and is_empty(fr.actual):
+            continue
+        return fr
+    return None
+
+
+def _measurement_if_actual(fr: FactorRow | None) -> dict | None:
+    """Замер, если факт непуст (иначе None — под-строка остаётся пустой рамкой)."""
+    if fr is None or is_empty(fr.actual):
+        return None
+    return _measurement(fr)
+
+
+def _extract_physical_measurements(rows: list[FactorRow]) -> dict:
+    """Файл 2: шум 1.3.2, вибрация локальная/общая 1.3.5/1.3.6, инфразвук 1.3.1."""
+    # Шум: строка 1.3.2 именно «Shovqin tovush darajasi… dBA» (в карте под номером
+    # 1.3.2 идёт ещё строка инфразвука — её не берём). Фолбэк — любая 1.3.2 с фактом.
+    noise = _row_by_section(rows, M.PHYSICAL_NOISE_SECTION,
+                            name_anchor=M.PHYSICAL_NOISE_NAME_ANCHOR)
+    if noise is None:
+        noise = _row_by_section(rows, M.PHYSICAL_NOISE_SECTION, need_actual=True)
+    out = {"noise": _measurement_if_actual(noise)}
+    for key, sec in M.PHYSICAL_SECTIONS.items():
+        out[key] = _measurement_if_actual(
+            _row_by_section(rows, sec, prefix=True, need_actual=True)
+        )
+    return out
+
+
+def _strip_category_unit(name: str) -> str:
+    """«Ib – 88(78-97), Vt/m» → «Ib – 88(78-97)» (срез единицы в метке категории)."""
+    s = normalize_spaces(name)
+    low = s.lower()
+    for marker in M.MICROCLIMATE_CATEGORY_UNIT_MARKERS:
+        pos = low.find(marker)
+        if pos != -1:
+            return s[:pos].strip()
+    return s
+
+
+def _extract_microclimate_measurements(rows: list[FactorRow]) -> dict:
+    """Файл 3: активная категория 1.8.x + температура/скорость/влажность/теплоизлучение.
+
+    Активна та строка 1.8.1..1.8.5, у которой заполнен факт. Метка «Ishlar toifasi»
+    («Iб – 88(78-97)») берётся из параллельного раздела 1.7 (WBGT) с тем же номером.
+    """
+    temp = None
+    category_label = ""
+    for idx, sec in enumerate(M.MICROCLIMATE_TEMP_SECTIONS):
+        fr = _row_by_section(rows, sec, need_actual=True)
+        if fr is not None:
+            temp = _measurement(fr)
+            cat_fr = _row_by_section(rows, M.MICROCLIMATE_CATEGORY_SECTIONS[idx])
+            if cat_fr and not is_empty(cat_fr.name):
+                category_label = _strip_category_unit(cat_fr.name)
+            break
+    return {
+        "category_label": category_label,
+        "temp": temp,
+        "air_speed": _measurement_if_actual(
+            _row_by_section(rows, M.MICROCLIMATE_AIR_SPEED_SECTION)),
+        "humidity": _measurement_if_actual(
+            _row_by_section(rows, M.MICROCLIMATE_HUMIDITY_SECTION)),
+        # Теплоизлучение: факт может быть текстом «йўқ» (не число) — сохраняем как есть.
+        "heat_radiation": _measurement_if_actual(
+            _row_by_section(rows, M.MICROCLIMATE_HEAT_SECTION)),
+    }
+
+
+_LIGHTING_DISCHARGE_RE = re.compile(r"\b(VIII|VII|III|VI|IV|IX|II|V|I)\b\s*$")
+
+
+def _extract_lighting_measurements(rows: list[FactorRow]) -> dict:
+    """Файл 4: разряд зрит. работ + КЕО (естеств./смеш.), искусств. лк, пульсация."""
+    discharge = ""
+    disc_row = next(
+        (fr for fr in rows if fold_contains(fr.name, M.LIGHTING_DISCHARGE_ANCHOR)), None
+    )
+    if disc_row:
+        m = _LIGHTING_DISCHARGE_RE.search(normalize_spaces(disc_row.name))
+        if m:
+            discharge = m.group(1)
+    out = {"discharge": discharge}
+    for key, sec in M.LIGHTING_SECTIONS.items():
+        out[key] = _measurement_if_actual(_row_by_section(rows, sec))
+    return out
+
+
+def _extract_em_measurements(rows: list[FactorRow]) -> dict:
+    """Файл 5: замеры ЭМИ 1.4.1..1.4.10 (у медиков заполнена обычно только 1.4.10)."""
+    out: dict[str, dict | None] = {}
+    for sec in M.EM_SECTIONS:
+        out[sec] = _measurement_if_actual(_row_by_section(rows, sec))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -668,6 +812,13 @@ def extract_card(docx_path: str | Path, basename: str) -> dict:
     factors = _factor_values(grid, factor_rows) if grid else {}
     substances = _extract_substances(factor_rows)
 
+    # Построчные замеры для Excel-протоколов лаб. замеров (файлы 2–5). Файл 1
+    # берёт norma/actual/cls из substances выше. См. mapping.*_SECTIONS.
+    physical_measurements = _extract_physical_measurements(factor_rows)
+    microclimate_measurements = _extract_microclimate_measurements(factor_rows)
+    lighting_measurements = _extract_lighting_measurements(factor_rows)
+    em_measurements = _extract_em_measurements(factor_rows)
+
     # Льготы (колонки 21–25 в 6_5) — ПРЯМО ИЗ КАРТЫ, раздел 4 (НЕ эвристики):
     #   отпуск/сокр.день/питание/молоко — таблица 4.1, колонка «Ҳақиқатда мавжудлиги»;
     #   льготная пенсия — текст 4.2 («…пенсия таъминоти ҳуқуқи __ ҳа __»).
@@ -719,6 +870,11 @@ def extract_card(docx_path: str | Path, basename: str) -> dict:
         "injury_risk_class_6_4": injury_risk_class_6_4,
         "ppe_status_6_4": ppe_status_6_4,
         "ppe_not_envisaged_6_4": ppe_not_envisaged_6_4,
+        # Построчные замеры для Excel-протоколов (файлы 2–5); файл 1 — из substances.
+        "physical_measurements": physical_measurements,
+        "microclimate_measurements": microclimate_measurements,
+        "lighting_measurements": lighting_measurements,
+        "em_measurements": em_measurements,
         "flags": flags,
     }
 

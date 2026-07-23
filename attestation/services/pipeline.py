@@ -85,6 +85,9 @@ _SUFFIX_COPY_FIELDS = (
     "factors", "substances", "benefits", "ppe_provided",
     "injury_risk", "privileged_pension", "employees_count", "female_count",
     "injury_risk_class_6_4", "ppe_status_6_4", "ppe_not_envisaged_6_4",
+    # Построчные замеры для Excel-протоколов (файлы 1–5)
+    "physical_measurements", "microclimate_measurements",
+    "lighting_measurements", "em_measurements",
 )
 
 
