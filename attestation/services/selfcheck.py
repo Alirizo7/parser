@@ -325,3 +325,116 @@ def compare_6_5_bilingual(generated_path, reference_path) -> CheckResult:
 # Ключевые поля (должны совпасть): реквизиты, код, должность, подытоги факторов
 # (хим/микро/свет/тяж/напр/общий), ЯТҲВ и льготы отпуск/сокр/лечпит.
 _REVIEW_6_5 = {4, 5, 6, 7, 8, 9, 10, 11, 12, 18, 22, 24}
+
+
+# ===========================================================================
+# Excel-протоколы лабораторных замеров — сравнение с эталонами excel_templates/
+# ===========================================================================
+# Единица счёта — заполненная ячейка ДАННЫХ (норма/факт/время/класс каждой
+# под-строки каждого РМ + итоговый класс блока). Сравниваем сгенерированный
+# xlsx с эталоном по СОДЕРЖАНИЮ (РМ → под-строки), позиции строк — из геометрии
+# блока (фикс. число под-строк у файлов 2–5; переменное у файла 1).
+#
+# Правила классификации (как в docx-самопроверке — «верим картам»):
+#   * РМ есть в эталоне, нет у нас → mismatch (потеряли рабочее место);
+#   * РМ есть у нас, нет в эталоне → note (эталон неполон/опустил — у нас по картам);
+#   * расхождение ячейки на РМ из ``_EXCEL_ANOMALY_WP`` → note (эталон клиента
+#     содержит опечатки ввода: на 000050 факт освещённости записан текстом,
+#     на 000051 факт/время смещены — наш вывод верен картам);
+#   * прочее расхождение ячейки → mismatch (регресс извлечения/рендера).
+from openpyxl import load_workbook as _load_wb
+from openpyxl.utils import get_column_letter as _colL
+
+# Колонки данных (1-индекс) по файлам: файл 1 сдвинут (norma=E, actual=I…).
+_EXCEL_COLMAP = {
+    1: dict(label=3, norma=5, actual=9, time=10, cls=11, final=12),
+    2: dict(label=3, norma=4, actual=8, time=9, cls=10, final=11),
+    3: dict(label=3, norma=4, actual=8, time=9, cls=10, final=11),
+    4: dict(label=3, norma=4, actual=8, time=9, cls=10, final=11),
+    5: dict(label=3, norma=4, actual=8, time=9, cls=10, final=11),
+}
+# Начало первого блока и фикс. число под-строк (None у файла 1 — переменное).
+_EXCEL_GEOM = {1: (31, None), 2: (31, 4), 3: (28, 9), 4: (28, 5), 5: (28, 16)}
+# Опечатки ввода в эталоне — ТОЧЕЧНО по (файл, РМ), а не по всему РМ во всех файлах:
+# 000051 — факт/время смещены в файлах 1/2/4; 000050 — факт освещённости текстом (файл 4).
+# В файлах 3/5 у этих РМ данные корректны, поэтому их регрессы должны ПРОВАЛИВАТЬ
+# гейт (не маскироваться в notes).
+_EXCEL_ANOMALY = {(1, "000051"), (2, "000051"), (4, "000050"), (4, "000051")}
+_EXCEL_WP_RE = re.compile(r"^\d{6}")
+
+
+def _excel_norm(value):
+    """Нормализовать значение ячейки для сравнения: число→float, текст→свёрнутый.
+
+    «-»/пусто → None; «0,7»/«27,0» → float; «йўқ»/«yo'q»/«yo`q» → «yoq» (апострофы
+    и пробелы выброшены). Диапазоны норм («23,0-31,0») сравниваются как текст.
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    if s in ("", "-", "—", "–", "−"):
+        return None
+    try:
+        return round(float(s.replace(",", ".")), 4)
+    except ValueError:
+        return re.sub(r"[`'’‘ʻʼ´\s]+", "", s.lower())
+
+
+def read_excel_protocol(path, idx: int) -> dict:
+    """Прочитать xlsx-протокол → {workplace_no: {'final', 'subrows':[{norma,actual,time,cls}]}}."""
+    ws = _load_wb(str(path))["complete"]
+    cm = _EXCEL_COLMAP[idx]
+    fixed = _EXCEL_GEOM[idx][1]
+    starts = [(r, str(ws.cell(r, 1).value).strip())
+              for r in range(1, ws.max_row + 1)
+              if isinstance(ws.cell(r, 1).value, str) and _EXCEL_WP_RE.match(str(ws.cell(r, 1).value).strip())]
+    blocks: dict[str, dict] = {}
+    for i, (r, wp) in enumerate(starts):
+        nextr = starts[i + 1][0] if i + 1 < len(starts) else ws.max_row + 1
+        end = (r + fixed) if fixed else nextr
+        subrows = []
+        for rr in range(r, min(end, nextr)):
+            subrows.append({k: ws.cell(rr, cm[k]).value for k in ("label", "norma", "actual", "time", "cls")})
+        blocks[wp] = {"final": ws.cell(r, cm["final"]).value, "subrows": subrows}
+    return blocks
+
+
+def compare_excel(generated_path, reference_path, idx: int) -> CheckResult:
+    """Сравнить сгенерированный xlsx-протокол с эталоном (единица — ячейка данных)."""
+    gen = read_excel_protocol(generated_path, idx)
+    ref = read_excel_protocol(reference_path, idx)
+    res = CheckResult()
+
+    for wp in sorted(set(ref) - set(gen)):
+        res.mismatches.append(f"{wp}: есть в эталоне, нет в сгенерированном")
+    for wp in sorted(set(gen) - set(ref)):
+        res.notes.append(f"{wp}: есть у нас, нет в эталоне (эталон опустил / неполон — у нас по картам)")
+
+    # Файл 1: метка под-строки (кол. C) — это ИМЯ вещества (данные), сверяем; у
+    # файлов 2–5 метка статична (из прото), в сверку не берём.
+    cmp_label = idx == 1
+    for wp in sorted(set(ref) & set(gen)):
+        g, e = gen[wp], ref[wp]
+        anomaly = (idx, wp) in _EXCEL_ANOMALY
+        bucket = res.notes if anomaly else res.mismatches
+        # Итоговый класс блока
+        res.total += 1
+        if _excel_norm(g["final"]) == _excel_norm(e["final"]):
+            res.matched += 1
+        else:
+            bucket.append(f"{wp} итог: эталон={e['final']!r} ≠ {g['final']!r}")
+        # Под-строки (позиционно)
+        keys = ("label", "norma", "actual", "time", "cls") if cmp_label else ("norma", "actual", "time", "cls")
+        for i in range(max(len(g["subrows"]), len(e["subrows"]))):
+            gsr = g["subrows"][i] if i < len(g["subrows"]) else {}
+            esr = e["subrows"][i] if i < len(e["subrows"]) else {}
+            for k in keys:
+                gv, ev = _excel_norm(gsr.get(k)), _excel_norm(esr.get(k))
+                if ev is None and gv is None:
+                    continue  # обе пусты — не считаем (рамка)
+                res.total += 1
+                if gv == ev:
+                    res.matched += 1
+                else:
+                    bucket.append(f"{wp} стр{i}.{k}: эталон={esr.get(k)!r} ≠ {gsr.get(k)!r}")
+    return res

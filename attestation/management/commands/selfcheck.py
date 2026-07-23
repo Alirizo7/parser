@@ -35,6 +35,8 @@ class Command(BaseCommand):
                             help="Сверять по содержанию между письмами (для латинского клиента)")
         parser.add_argument("--ref-5-1b", default="", help="Путь к правильному 5_1б (вне архива)")
         parser.add_argument("--ref-6-5", default="", help="Путь к правильному 6_5 (вне архива)")
+        parser.add_argument("--excel-dir", default="",
+                            help="Папка с эталонами Excel-протоколов (N_*.xlsx) для сверки 5 xlsx")
         parser.add_argument("--workdir", default="")
 
     def handle(self, *args, **opts) -> None:
@@ -61,6 +63,10 @@ class Command(BaseCommand):
             failed |= not self._check_5_1b(result, ref_5)
         if "6_5" in targets:
             failed |= not self._check_6_5(result, ref_65)
+
+        # Excel-протоколы (5 xlsx) — сверка при указанной --excel-dir
+        if opts["excel_dir"] and not opts["only"]:
+            failed |= not self._check_excel(result, Path(opts["excel_dir"]))
 
         if failed:
             raise CommandError("Самопроверка НЕ пройдена (см. расхождения выше).")
@@ -89,6 +95,34 @@ class Command(BaseCommand):
         generated = render.render_5_1b(result.workplaces, self.out_dir / "generated_5_1b.docx")
         check = selfcheck.compare_5_1b(generated, self._to_docx(ref), bilingual=self.bilingual)
         return self._report(check, "рабочих мест")
+
+    # Эталоны Excel-протоколов: idx → маска имени файла в --excel-dir
+    _EXCEL_REFS = {
+        1: "1_*.xlsx", 2: "2_*.xlsx", 3: "3_*.xlsx", 4: "4_*.xlsx", 5: "5_*.xlsx",
+    }
+    _EXCEL_RENDER = {
+        1: "render_excel_1", 2: "render_excel_2", 3: "render_excel_3",
+        4: "render_excel_4", 5: "render_excel_5",
+    }
+
+    def _check_excel(self, result, excel_dir: Path) -> bool:
+        self.stdout.write("\n=== Excel-протоколы (5 xlsx) ===")
+        ok_all = True
+        total_matched = 0
+        for idx in range(1, 6):
+            refs = sorted(excel_dir.glob(self._EXCEL_REFS[idx]))
+            if not refs:
+                self.stdout.write(self.style.WARNING(f"Эталон файла {idx} не найден — пропуск."))
+                continue
+            gen = getattr(render, self._EXCEL_RENDER[idx])(
+                result.company_data, result.workplaces,
+                self.out_dir / f"generated_excel_{idx}.xlsx", lang="lat",
+            )
+            check = selfcheck.compare_excel(gen, refs[0], idx)
+            total_matched += check.matched
+            ok_all &= self._report(check, f"ячеек (файл {idx})")
+        self.stdout.write(f"  Excel всего совпало ячеек: {total_matched}")
+        return ok_all
 
     def _check_6_5(self, result, ref) -> bool:
         self.stdout.write("\n=== Шаблон 6_5 ===")
