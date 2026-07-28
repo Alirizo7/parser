@@ -169,6 +169,18 @@ def _read_6_5(docx_path):
     return reqs, data
 
 
+# Колонки (ИНДЕКСЫ GRID, не логические — ср. _REVIEW_6_5 для bilingual), расхождение
+# по которым уходит в notes: ручной эталон клиента там расходится с его же картами,
+# а мы верим картам.
+#   c18 «травмо» — эталон Бухоро ставит 000031 (рентгенолаборант) класс 1, тогда как
+#     в карте п.2.3 = «____2____». Его же 6_4 тоже пишет 1 (17/18 против наших 16/19),
+#     т.е. клиент разошёлся с картой одинаково в обоих документах. Наш 6_4 выводил «2»
+#     с самого начала — фикс c18 лишь сделал 6_5 согласованным с 6_4 и картой.
+#   c22 «сут» — эталон Бухоро вручную ставит молоко=ҳа всем медикам (20 РМ) вопреки
+#     форме карты. То же и у Бухоро ШТБ (13 РМ).
+_REVIEW_6_5_GRID = {18, 22}
+
+
 def compare_6_5(generated_path, reference_path) -> CheckResult:
     gen_reqs, gen = _read_6_5(generated_path)
     ref_reqs, ref = _read_6_5(reference_path)
@@ -197,9 +209,7 @@ def compare_6_5(generated_path, reference_path) -> CheckResult:
             else:
                 msg = (f"{no} c{c}({_6_5_COL_NAMES.get(c, c)}): "
                        f"эталон={ref[no][c]!r} ≠ {gen[no][c]!r}")
-                # «Сут» (c22) в эталоне Бухоро вручную переопределён для медиков
-                # вопреки форме карты — расхождение, а не ошибка извлечения.
-                (res.notes if c == 22 else res.mismatches).append(msg)
+                (res.notes if c in _REVIEW_6_5_GRID else res.mismatches).append(msg)
     return res
 
 
