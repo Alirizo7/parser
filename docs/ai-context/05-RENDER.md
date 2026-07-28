@@ -62,7 +62,7 @@
 | 1 | `position_from_perechen` или `position` (приоритет — «Перечень», как в эталонах) |
 | 2 | `job_code` |
 | 3–17 | факторы по `_FACTOR_COLS`: chem, biological, aerosols, noise, infrasound, ultrasound_air, vibration_general, vibration_local, em_field, ionizing, microclimate, lighting, severity, intensity, overall; пусто → `"-"` |
-| 18 | `injury_risk` |
+| 18 | `injury_risk_value(rec)` = `injury_risk_class_6_4 or injury_risk` — п.2.3 карты, эвристика лишь фолбэк. **То же поле, что считает 6_4** |
 | 19 | `ppe_provided` |
 | 20 | `benefits.extra_leave` |
 | 21 | `benefits.reduced_hours` |
@@ -92,7 +92,8 @@ employees / female — иш ўринлари / ходимлар / аёллар).
 
 - Класс условий труда: старшая цифра `factors.overall` (`"3.2"→"3"`); не извлечён →
   warning (только на проходе units, чтобы не троить).
-- Класс травмоопасности: `injury_risk_class_6_4`; не извлечён → warning.
+- Класс травмоопасности: `injury_risk_class_6_4`; не извлечён → warning. То же
+  поле идёт в c18 6_5 (через `injury_risk_value`) — 6_4 и 6_5 не расходятся.
 - ЯТҲВ: `ppe_status_6_4 == "mos_emas"` → c10, ЛЮБОЕ другое (включая пустое) → c9
   «Мос»; НЕЗАВИСИМО: `ppe_not_envisaged_6_4` → c11. Колонки c9 и c11 намеренно
   пересекаются (эталон: Мос=114, кўзда=93).

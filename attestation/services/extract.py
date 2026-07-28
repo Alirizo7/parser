@@ -770,6 +770,24 @@ def _injury_risk(medical: bool) -> str:
     return M.INJURY_RISK_MEDICAL if medical else M.INJURY_RISK_DEFAULT
 
 
+def injury_risk_value(rec: dict) -> str:
+    """Класс травмоопасности, который реально идёт в документы — ЕДИНОЕ поле.
+
+    Основной источник — п.2.3 карты (``injury_risk_class_6_4``): его же считает
+    ``render_6_4``, его же правит оператор в ревью. Раньше 6_5 (колонка c18)
+    брала ЭВРИСТИКУ ``injury_risk`` («медик→1, иначе→2»), и два документа по
+    одному архиву расходились: у Узтелекома п.2.3 = «1» у 9 из 22 карт, а
+    эвристика ставила всем «2»; у медиков Бухоро ШТБ — наоборот.
+
+    Эвристика остаётся ФОЛБЭКОМ и нужна для двух случаев:
+    * батчи, извлечённые до появления п.2.3 (в БД лежит JSON без этого ключа) —
+      рендер не должен падать и не должен выводить пустую ячейку;
+    * карта, где п.2.3 не прочитался, — тогда ``extract_card`` ставит флаг
+      ``injury_risk_heuristic`` и колонка подсвечивается в ревью.
+    """
+    return rec.get("injury_risk_class_6_4") or rec.get("injury_risk") or ""
+
+
 def _extract_pension(doc: Doc) -> str:
     """Льготная пенсия — из раздела 4.2 карты: «…пенсия таъминоти ҳуқуқи __ ҳа __».
 
@@ -842,7 +860,11 @@ def extract_card(docx_path: str | Path, basename: str) -> dict:
     flags: list[str] = []
     if not factors.get("overall") or factors.get("overall") == "-":
         flags.append("overall_missing")
-    flags.append("injury_risk_heuristic")     # травмоопасность (c18) — эвристика
+    if not injury_risk_class_6_4:
+        # П.2.3 карты не прочитан → и 6_5 (c18), и 6_4 упадут на эвристику
+        # «медик→1, иначе→2» (см. injury_risk_value). Флаг ставим ТОЛЬКО здесь:
+        # когда п.2.3 есть, значение детерминировано и подсвечивать нечего.
+        flags.append("injury_risk_heuristic")
     if not employees_count:
         # Нет строки «ишловчилар сони» в карте — считаем минимум 1 (карта
         # описывает занятое рабочее место), но подсвечиваем для проверки.
