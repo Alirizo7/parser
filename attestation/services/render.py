@@ -17,7 +17,7 @@ from openpyxl import load_workbook
 
 from . import mapping as M
 from . import xlsx
-from .extract import split_workplace_no, workplace_sort_key
+from .extract import injury_risk_value, split_workplace_no, workplace_sort_key
 from .normalize import _to_int, fold, fold_contains, max_class, normalize_spaces, to_latin
 
 ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
@@ -177,7 +177,9 @@ def row_values_6_5(rec: dict) -> list[str]:
     vals[2] = rec.get("job_code", "")
     for ci, key in _FACTOR_COLS:
         vals[ci] = f.get(key, "-") or "-"
-    vals[18] = rec.get("injury_risk", "")
+    # Травмоопасность — из п.2.3 карты (то же поле, что считает 6_4); эвристика
+    # «медик→1, иначе→2» осталась лишь фолбэком. См. extract.injury_risk_value.
+    vals[18] = injury_risk_value(rec)
     vals[19] = rec.get("ppe_provided", "")
     vals[20] = b.get("extra_leave", "")
     vals[21] = b.get("reduced_hours", "")

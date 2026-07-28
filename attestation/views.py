@@ -17,7 +17,7 @@ from django.views.decorators.http import require_POST
 
 from . import jobs
 from .models import Batch
-from .services.extract import workplace_sort_key
+from .services.extract import injury_risk_value, workplace_sort_key
 
 YESNO = ["ҳа", "йўқ"]
 
@@ -42,7 +42,9 @@ REVIEW_COLUMNS = [
     ("factors.severity", "Оғирлик", "text", None, None),
     ("factors.intensity", "Тиғизлик", "text", None, None),
     ("factors.overall", "Умумий", "text", None, "overall_missing"),
-    ("injury_risk", "Шикастланиш", "select", ["1", "2", "3"], "injury_risk_heuristic"),
+    # Травмоопасность правится в ОДНОМ поле — п.2.3 карты: оно идёт и в 6_5
+    # (колонка c18), и в 6_4. Варианты 1/2/3 — как в самом п.2.3 карты.
+    ("injury_risk_class_6_4", "Шикастланиш", "select", ["1", "2", "3"], "injury_risk_heuristic"),
     ("ppe_provided", "ЯТҲВ", "select", YESNO, None),
     ("benefits.extra_leave", "Қўш. таътил", "select", YESNO, None),
     ("benefits.reduced_hours", "Қисқарт. вақт", "select", YESNO, None),
@@ -55,13 +57,23 @@ REVIEW_COLUMNS = [
 
 # Пояснения к флагам (для легенды и подсказок)
 FLAG_HINTS = {
-    "injury_risk_heuristic": "Травмоопасность определена эвристикой (медик→1, иначе→2) — проверьте.",
+    "injury_risk_heuristic": "П.2.3 карты не прочитан — травмоопасность взята эвристикой (медик→1, иначе→2), проверьте.",
     "job_code_missing": "Код должности не найден в «Перечне» — введите вручную.",
     "overall_missing": "Не извлечён общий класс условий труда — проверьте карту.",
     "position_mismatch": "Должность в «Перечне» и в карте на этом номере различаются — проверьте.",
     "substances_missing": "В карте не найдены вредные вещества — при необходимости добавьте вручную.",
     "employees_count_missing": "В карте не найдена строка «Ишловчилар сони» — принято 1, проверьте (влияет на документ 6_4).",
     "female_count_missing": "В карте не найдена гендерная разбивка — «Шу жумладан аёллар» пусто (влияет на документ 6_4).",
+}
+
+
+# Колонки, чьё ОТОБРАЖАЕМОЕ значение считается, а не читается по пути напрямую:
+# оператор должен видеть ровно то, что уйдёт в документ. Правка всё равно
+# записывается по пути колонки (см. edit_cell) — фолбэк только на чтение.
+VALUE_RESOLVERS = {
+    # Батчи, извлечённые до появления п.2.3, лежат в БД без этого ключа —
+    # показываем фолбэк-эвристику, которую в этом случае выведет и рендер.
+    "injury_risk_class_6_4": injury_risk_value,
 }
 
 
@@ -166,10 +178,11 @@ def _review_context(batch: Batch) -> dict:
         flags = set(wp.get("flags", []))
         cells = []
         for path, label, ctype, choices, flag in REVIEW_COLUMNS:
+            resolver = VALUE_RESOLVERS.get(path)
             cells.append(
                 {
                     "path": path,
-                    "value": get_nested(wp, path),
+                    "value": resolver(wp) if resolver else get_nested(wp, path),
                     "type": ctype,
                     "choices": choices,
                     "flagged": flag in flags if flag else False,
