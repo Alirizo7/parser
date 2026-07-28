@@ -975,6 +975,17 @@ def parse_perechen_positions_6_4(docx_path: str | Path) -> tuple[list[dict], lis
     формулировки названия подразделения (см. Шаг 2 спецификации). Повторы
     одного номера (напр. две карты одной "а"-позиции на разные смены)
     сохраняются как отдельные позиции, не схлопываются в одну (Шаг 3/5).
+
+    ⚠️ Разделителей может быть НЕСКОЛЬКО ПОДРЯД: у Узтелекома «Перечень» несёт
+    двухуровневую иерархию отдельными строками-слияниями («Buxoro bo'limi» +
+    «Boshqaruv apparati»), и уровень строки ничем не размечен (все они жирные,
+    по центру, одного кегля). Подряд идущие разделители СКЛЕИВАЕМ в одно
+    название через пробел — так же, как выглядит подразделение в карте (и,
+    значит, в 6_5). Иначе оставался бы только последний уровень, и разные
+    физические участки с одноимённым вторым уровнем («Boshqaruv apparati»
+    Бухоро и Навои, «Liniya-kabel xo'jaligi guruhi» пяти участков)
+    схлопывались бы в один блок 6_4 — группировка там глобальная по
+    ``fold(subdivision_6_4)``. Каждая склейка сообщается в ``warnings``.
     """
     document = Document(str(docx_path))
     warnings: list[str] = []
@@ -988,13 +999,23 @@ def parse_perechen_positions_6_4(docx_path: str | Path) -> tuple[list[dict], lis
 
     positions: list[dict] = []
     current_sub = ""
+    prev_row_was_separator = False
     for row in table.rows:
         cells = row.cells
         text0 = normalize_spaces(cells[0].text) if cells else ""
         is_merged_full_row = len({id(c._tc) for c in cells}) == 1
         if is_merged_full_row and text0 and not _PERECHEN_WP_RE.match(text0):
-            current_sub = text0
+            if prev_row_was_separator:
+                current_sub = f"{current_sub} {text0}".strip()
+                warnings.append(
+                    f"6_4: строки-разделители «Перечня» идут подряд — название "
+                    f"подразделения склеено в «{current_sub}»."
+                )
+            else:
+                current_sub = text0
+            prev_row_was_separator = True
             continue
+        prev_row_was_separator = False
         wp = normalize_spaces(cells[workplace_col].text) if workplace_col < len(cells) else ""
         if not _PERECHEN_WP_RE.match(wp):
             continue
@@ -1004,4 +1025,26 @@ def parse_perechen_positions_6_4(docx_path: str | Path) -> tuple[list[dict], lis
             "employees_count": normalize_number(cells[workers_col].text) if workers_col < len(cells) else "",
             "female_count": normalize_number(cells[female_col].text) if female_col < len(cells) else "",
         })
+
+    # Одно и то же название встретилось В РАЗНЫХ местах «Перечня» (между ними был
+    # другой разделитель). Группировка 6_4 — глобальная по ``fold``, поэтому такие
+    # строки СОЛЬЮТСЯ в один блок. Иногда это верно (у Узтелекома карты 000004 и
+    # 000013–15 обе называют подразделение просто «Avtotransport uchastkasi»), а
+    # иногда нет (одноимённый «Telekommunikatsiya … guruhi» Навои и Кизилтепы —
+    # разные участки, в карте различаются префиксом). Из «Перечня» отличить их
+    # нечем: уровень строки-разделителя там ничем не размечен. Поэтому не гадаем,
+    # а громко сообщаем оператору — пусть сверит с картами.
+    runs: list[str] = []
+    for pos in positions:
+        key = fold(pos["subdivision"])
+        if not runs or runs[-1] != key:
+            runs.append(key)
+    for key in {k for k in runs if runs.count(k) > 1}:
+        members = [p["workplace_no"] for p in positions if fold(p["subdivision"]) == key]
+        name = next(p["subdivision"] for p in positions if fold(p["subdivision"]) == key)
+        warnings.append(
+            f"6_4: подразделение «{name}» встречается в «Перечне» несколько раз "
+            f"с разрывом — в 6_4 эти позиции попадут в ОДИН блок "
+            f"({', '.join(members)}); проверьте по картам, не разные ли это участки."
+        )
     return positions, warnings
