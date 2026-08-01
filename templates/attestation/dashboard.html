@@ -41,6 +41,10 @@
                  class="rounded-lg border border-emerald-200 px-3 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-50">5_1б</a>
               <a href="{% url 'attestation:download' batch.pk '6_5' %}"
                  class="rounded-lg border border-emerald-200 px-3 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-50">6_5</a>
+              {% if batch.output_6_6 %}
+                <a href="{% url 'attestation:download' batch.pk '6_6' %}"
+                   class="rounded-lg border border-emerald-200 px-3 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-50">6_6</a>
+              {% endif %}
             {% endif %}
           </div>
         </td>

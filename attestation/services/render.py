@@ -1,4 +1,4 @@
-"""Заполнение шаблонов 5_1б и 6_5 через python-docx.
+"""Заполнение шаблонов 5_1б, 6_4, 6_5 и 6_6 через python-docx.
 
 Подход: берём фиксированный пустой шаблон-ассет, очищаем строки тела ниже
 шапки и генерируем тело заново из единого датасета (см. ``pipeline``).
@@ -11,6 +11,10 @@ from copy import deepcopy
 from pathlib import Path
 
 from docx import Document
+from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
+from docx.shared import Pt
 from docx.table import Table
 
 from openpyxl import load_workbook
@@ -18,12 +22,25 @@ from openpyxl import load_workbook
 from . import mapping as M
 from . import xlsx
 from .extract import injury_risk_value, split_workplace_no, workplace_sort_key
-from .normalize import _to_int, fold, fold_contains, max_class, normalize_spaces, to_latin
+from .normalize import (
+    _to_int,
+    class_rank,
+    fold,
+    fold_contains,
+    max_class,
+    normalize_spaces,
+    to_cyrillic,
+    to_latin,
+)
 
 ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
 TEMPLATE_5_1B = ASSETS_DIR / "template_5_1b.docx"
 TEMPLATE_6_5 = ASSETS_DIR / "template_6_5.docx"
 TEMPLATE_6_4 = ASSETS_DIR / "template_6_4.docx"
+TEMPLATE_6_6 = {
+    "cyr": ASSETS_DIR / "template_6_6_cyr.docx",
+    "lat": ASSETS_DIR / "template_6_6_lat.docx",
+}
 TEMPLATE_EXCEL = {n: ASSETS_DIR / f"template_excel_{n}.xlsx" for n in range(1, 6)}
 
 
@@ -83,6 +100,54 @@ def _append_row(table: Table, prototype):
     tr = deepcopy(prototype)
     table._tbl.append(tr)
     return table.rows[-1]
+
+
+def _prevent_row_split(row) -> None:
+    """Не позволять Word/LibreOffice разрывать строку таблицы между страницами."""
+    if row._tr.xpath("./w:trPr/w:cantSplit"):
+        return
+    row._tr.get_or_add_trPr().append(OxmlElement("w:cantSplit"))
+
+
+def _repeat_table_header(row) -> None:
+    """Повторять строку шапки таблицы на каждой следующей странице."""
+    if row._tr.xpath("./w:trPr/w:tblHeader"):
+        return
+    row._tr.get_or_add_trPr().append(OxmlElement("w:tblHeader"))
+
+
+def _keep_row_with_next(row) -> None:
+    """Не отрывать строку-заголовок/промежуточный итог от следующей строки."""
+    seen: set[int] = set()
+    for cell in row.cells:
+        if id(cell._tc) in seen:
+            continue
+        seen.add(id(cell._tc))
+        for paragraph in cell.paragraphs:
+            p_pr = paragraph._p.get_or_add_pPr()
+            if not p_pr.xpath("./w:keepNext"):
+                p_pr.append(OxmlElement("w:keepNext"))
+
+
+def _remove_trailing_empty_paragraphs(doc) -> None:
+    """Удалить пустые абзацы ассета после последней таблицы.
+
+    В шаблоне 6.4 после тела осталось несколько пустых абзацев. Когда таблица
+    заканчивается у нижнего поля страницы, LibreOffice переносит их на отдельную
+    полностью пустую страницу. Содержательных абзацев не удаляем.
+    """
+    body = doc._element.body
+    children = list(body.iterchildren())
+    last_table = max(
+        (index for index, child in enumerate(children) if child.tag.endswith("}tbl")),
+        default=-1,
+    )
+    for child in children[last_table + 1:]:
+        if not child.tag.endswith("}p"):
+            continue
+        text = "".join(child.itertext()).strip()
+        if not text:
+            body.remove(child)
 
 
 def _pct_num(value: str) -> str:
@@ -272,6 +337,300 @@ def render_6_5(company_data: dict, workplaces: list[dict], out_path: str | Path,
     return out_path
 
 
+# --- 6_6: план мероприятий по вредным факторам -----------------------------
+# Порядок строк повторяет порядок факторов в готовых клиентских 6.6. Одна
+# группа даёт максимум одно мероприятие на карту, даже если вредны несколько
+# родственных подфакторов (например, шум и вибрация).
+_PLAN_GROUPS_6_6 = (
+    ("chem", ("chem", "aerosols")),
+    ("biological", ("biological",)),
+    ("physical", ("noise", "infrasound", "ultrasound_air", "vibration_general", "vibration_local")),
+    ("radiation", ("em_field", "ionizing")),
+    ("microclimate", ("microclimate",)),
+    ("lighting", ("lighting",)),
+    ("severity", ("severity",)),
+    ("intensity", ("intensity",)),
+)
+
+_PLAN_MEASURES_6_6 = {
+    "lat": {
+        "chem": (
+            "Zararli mehnat sharoitlarini hisobga olgan holda, shaxsiy nafas olish "
+            "vositalaridan foydalaning. Yuqori samaradorlikni saqlash va mehnat "
+            "unumdorligini oshirish uchun tartibga solinadigan tanaffuslarni ta‘minlang. "
+            "Ish va dam olish tartibini saqlang."
+        ),
+        "biological": (
+            "Biologik omillar ta’siri davomiyligini kamaytiring, sanitariya-gigiyena "
+            "tadbirlarini kuchaytiring va xodimlarni zarur himoya vositalari bilan ta’minlang."
+        ),
+        "physical": (
+            "Shovqinning va tebranishning zararli ta‘sirini kamaytirish uchun hodimga "
+            "mos keladi. Eshitish organlari va tebranishni kamaytirish choralari "
+            "(eshitish vositasi yoki qabul qiluvchi va maxsus tebranishni oldini oluvchi "
+            "maxsus oyoq kiyimlar yoki rezina poliklar)."
+        ),
+        "radiation": (
+            "Nurlanish ta’sirini kamaytiring: himoya ekranlari va xavfsiz masofani "
+            "ta’minlang, ta’sir vaqtini me’yorlang, davriy nazorat o‘tkazing hamda "
+            "xodimlarni belgilangan shaxsiy himoya vositalari bilan ta’minlang."
+        ),
+        "microclimate": (
+            "Sanoat va turar-joy binolarida normal issiqlik sharoitlari va mikroiqlim, "
+            "toza havoni ta‘minlash uchun issiqlik va havo pardalari, aspiratsiya va "
+            "chang va gazni ushlab turuvchi qurilmalarni yangi isitish va shamollatish "
+            "tizimlarini o‘rnatish va mavjudlarini rekonstruksiya qilish."
+        ),
+        "lighting": (
+            "Yoritishni me’yorga keltiring (chiroqlar sonini ko‘paytiring, ish joyining "
+            "ustiga umumiy yoritish chiroqini o‘rnating, mahalliy yoritish chiroqini "
+            "o‘rnating, yuqori quvvatli lampalardan foydalaning)"
+        ),
+        "intensity": (
+            "Mehnat jarayonining asabiy-emotsional keskinligini hisobga olgan holda, "
+            "xodimning ichki mehnat rejimini tartibga solish va mehnat jarayonining "
+            "hissiy tanglik darajasini pasaytirish bo‘yicha chora-tadbirlarni ishlab "
+            "chiqish va qabul qilish."
+        ),
+    },
+    "cyr": {
+        "chem": (
+            "Зарарли меҳнат шароитларини ҳисобга олган ҳолда, шахсий нафас олиш "
+            "воситаларидан фойдаланинг. Юқори самарадорликни сақлаш ва меҳнат "
+            "унумдорлигини ошириш учун тартибга солинадиган танаффусларни таъминланг. "
+            "Иш ва дам олиш тартибини сақланг"
+        ),
+        "biological": (
+            "Биологик омиллар таъсири давомийлигини камайтиринг, санитария-гигиена "
+            "тадбирларини кучайтиринг ва ходимларни зарур ҳимоя воситалари билан таъминланг."
+        ),
+        "physical": (
+            "Шовқиннинг зарарли таъсирини камайтириш учун ходимга мос келади "
+            "Эшитиш органлари (ешитиш воситаси ёки қабул қилувчи)"
+        ),
+        "radiation": (
+            "Нурланиш таъсирини камайтиринг: ҳимоя экранлари ва хавфсиз масофани "
+            "таъминланг, таъсир вақтини меъёрланг, даврий назорат ўтказинг ҳамда "
+            "ходимларни белгиланган шахсий ҳимоя воситалари билан таъминланг."
+        ),
+        "microclimate": (
+            "Саноат ва турар-жой биноларида нормал иссиқлик шароитлари ва микроиқлим, "
+            "тоза ҳавони таъминлаш учун иссиқлик ва ҳаво пардалари, аспирация ва чанг "
+            "ва газни ушлаб турувчи қурилмаларни янги иситиш ва шамоллатиш тизимларини "
+            "ўрнатиш ва мавжудларини реконструкция қилиш."
+        ),
+        "lighting": (
+            "Ёритишни меъёрга келтиринг (чироқлар сонини кўпайтиринг, иш жойининг "
+            "устига умумий ёритиш чироқини ўрнатинг, маҳаллий ёритиш чироқини "
+            "ўрнатинг, юқори қувватли лампалардан фойдаланинг)"
+        ),
+        "intensity": (
+            "Меҳнат жараёнининг асабий-эмоционал кескинлигини ҳисобга олган ҳолда, "
+            "ходимнинг ички меҳнат режимини тартибга солиш ва меҳнат жараёнининг "
+            "ҳиссий танглик даражасини пасайтириш бўйича чора-тадбирларни ишлаб "
+            "чиқиш ва қабул қилиш."
+        ),
+    },
+}
+
+_SEVERITY_MEASURE_6_6 = {
+    "lat": (
+        "Mehnatning og‘irligini hisobga olgan holda{detail} ish va dam olish rejimini "
+        "ishlab chiqish tavsiya etiladi, gimnastika mashqlari bilan ish kuni davomida "
+        "uzoq muddatli tartibga solingan tanaffuslarni nazarda tutadi. Ish kuni va "
+        "haftaning dinamikasida mehnat jarayonining og‘irligini kamaytirish uchun "
+        "mehnat va dam olishning oqilona almashinuvi rejimiga qat‘iy rioya qilish kerak."
+    ),
+    "cyr": (
+        "Меҳнатнинг оғирлигини ҳисобга олган ҳолда{detail} иш ва дам олиш режимини "
+        "ишлаб чиқиш тавсия этилади, гимнастика машқлари билан иш куни давомида "
+        "узоқ муддатли тартибга солинган танаффусларни назарда тутади. Иш куни ва "
+        "ҳафтанинг динамикасида меҳнат жараёнининг оғирлигини камайтириш учун "
+        "меҳнат ва дам олишнинг оқилона алмашинуви режимига қатъий риоя қилиш керак."
+    ),
+}
+
+_PLAN_EXECUTION_6_6 = {
+    "lat": ("Qo'llanma", "Tashkilot byudjeti", "MM va TB xodimiga",
+            "Doimiy ravishda", "Boshqaruv"),
+    # В двух кириллических эталонах колонка «масъул» тоже равна «Қўлланма».
+    "cyr": ("Қўлланма", "Ташкилот бюджети", "Қўлланма",
+            "Доимий равишда", "Бошқарув"),
+}
+
+
+def _plan_text_6_6(text: str, lang: str) -> str:
+    """Локализовать только управляемый статичный текст 6_6.
+
+    Данные компании и должности не транслитерируем: имена/бренды/коды должны
+    оставаться ровно такими, какими были извлечены или исправлены оператором.
+    """
+    return to_cyrillic(text) if lang == "cyr" else text
+
+
+def _group_is_harmful_6_6(workplace: dict, group: str, keys: tuple[str, ...], lang: str) -> bool:
+    factors = workplace.get("factors", {}) or {}
+    if group == "chem" and lang == "cyr":
+        # Оба кириллических эталона не создают мероприятие, когда 3.x получен
+        # только расчётной строкой «Йиғиш омили»; нужен конкретный вредный агент
+        # либо вредный аэрозоль. Латинский эталон, напротив, включает этот случай.
+        substances = workplace.get("substances", []) or []
+        harmful_agent = any(
+            class_rank(item.get("cls", "")) >= 30
+            and "yigish omili" not in fold(item.get("name", ""))
+            for item in substances
+        )
+        return harmful_agent or class_rank(factors.get("aerosols", "")) >= 30
+    return any(class_rank(factors.get(key, "")) >= 30 for key in keys)
+
+
+def _severity_measure_6_6(workplace: dict, lang: str) -> str:
+    posture = ((workplace.get("plan_6_6") or {}).get("severity_posture") or "").strip()
+    if posture:
+        posture = to_cyrillic(posture) if lang == "cyr" else to_latin(posture)
+    detail = f" ({posture})" if posture else ""
+    return _SEVERITY_MEASURE_6_6[lang].format(detail=detail)
+
+
+def _workplace_plan_rows_6_6(workplace: dict, lang: str) -> list[list[str]]:
+    lang = lang if lang in TEMPLATE_6_6 else "cyr"
+    operational = _PLAN_EXECUTION_6_6[lang]
+    result: list[list[str]] = []
+    first = True
+    for group, keys in _PLAN_GROUPS_6_6:
+        if not _group_is_harmful_6_6(workplace, group, keys, lang):
+            continue
+        measure = (
+            _severity_measure_6_6(workplace, lang)
+            if group == "severity"
+            else _PLAN_MEASURES_6_6[lang][group]
+        )
+        card = _plan_text_6_6(f"Karta\n№{workplace.get('workplace_no', '')}", lang) if first else ""
+        first = False
+        result.append([
+            card, measure,
+            operational[0], operational[1], operational[2], operational[3], operational[4], "",
+        ])
+    return result
+
+
+def plan_sections_6_6(workplaces: list[dict], *, lang: str = "cyr") -> list[tuple[str, list[list[str]]]]:
+    """Сгруппировать строки плана по подразделениям, как в готовых 6.6."""
+    sections: list[tuple[str, list[list[str]]]] = []
+    ordered = sorted(workplaces, key=lambda w: workplace_sort_key(w.get("workplace_no", "")))
+    for workplace in ordered:
+        rows = _workplace_plan_rows_6_6(workplace, lang)
+        if not rows:
+            continue
+        subdivision = workplace.get("subdivision", "") or "—"
+        if not sections or sections[-1][0] != subdivision:
+            sections.append((subdivision, []))
+        sections[-1][1].extend(rows)
+    return sections
+
+
+def plan_rows_6_6(workplaces: list[dict], *, lang: str = "cyr") -> list[list[str]]:
+    """Плоский список карточных строк 6.6 (без строк подразделений)."""
+    rows = [row for _subdivision, block in plan_sections_6_6(workplaces, lang=lang) for row in block]
+    if not rows:
+        rows.append([
+            "—", _plan_text_6_6("3–4-sinf zararli omillar aniqlanmadi.", lang),
+            "", "", "", "", "", "",
+        ])
+    return rows
+
+
+def _append_spanning_row_6_6(table: Table, prototype, text: str):
+    row = _append_row(table, prototype)
+    _prevent_row_split(row)
+    cell = row.cells[0].merge(row.cells[-1])
+    # ``merge`` переносит по абзацу из каждой из восьми ячеек. Обычный
+    # ``set_cell_text`` очистил бы runs, но оставил семь пустых абзацев и
+    # искусственно раздувал строку. Присваивание ``cell.text`` схлопывает их.
+    cell.text = text
+    cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+    for paragraph in cell.paragraphs:
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        for run in paragraph.runs:
+            run.bold = True
+    return row
+
+
+def _format_data_row_6_6(row, lang: str) -> None:
+    """Привести строку к фактической вёрстке трёх готовых форм.
+
+    В исходных пустых шаблонах у строки-прототипа остался
+    межабзацный интервал 14 pt, из-за чего каждое мероприятие
+    занимало лишнее место. Эталоны используют 9 pt для кириллицы
+    и 10 pt для латиницы, без дополнительных интервалов.
+    """
+    font_size = Pt(9 if lang == "cyr" else 10)
+    for cell_index, cell in enumerate(row.cells):
+        cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+        for paragraph in cell.paragraphs:
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            paragraph.paragraph_format.space_before = Pt(0)
+            paragraph.paragraph_format.space_after = Pt(0)
+            for run in paragraph.runs:
+                run.font.size = font_size
+                if cell_index == 0:
+                    run.bold = True
+
+
+def _ppe_summary_6_6(company_data: dict, lang: str) -> str:
+    mandatory = (company_data.get("ppe_mandatory_6_6") or "").strip()
+    additional = (company_data.get("ppe_additional_6_6") or "").strip()
+    # В эталонах дополнительный коллективный договор переносится только в
+    # кириллической форме и только когда в карте указан настоящий реквизит
+    # (дата/номер), а не пустая подпись «Жамоа шартномаси».
+    if lang != "cyr" or not re.search(r"\d", additional):
+        additional = ""
+    values = [mandatory, additional]
+    return " ".join(v for v in values if v)
+
+
+def render_6_6(company_data: dict, workplaces: list[dict], out_path: str | Path,
+               *, template_path: str | Path | None = None, lang: str = "cyr") -> Path:
+    """Сформировать приложение 6.6 — динамический план мероприятий."""
+    lang = lang if lang in TEMPLATE_6_6 else "cyr"
+    selected_template = Path(template_path) if template_path else TEMPLATE_6_6[lang]
+    doc = Document(str(selected_template))
+    # Первая таблица — чистый двухколоночный блок согласования/утверждения;
+    # реквизиты и план всегда две последние таблицы шаблона.
+    _fill_reqs(doc.tables[-2], company_data)
+    measures = doc.tables[-1]
+    for header_row in measures.rows[:2]:
+        _repeat_table_header(header_row)
+    prototype = _clear_body(measures, keep_header_rows=2)
+    if prototype is None:
+        raise ValueError("Шаблон 6_6 не содержит строку-прототип тела")
+
+    sections = plan_sections_6_6(workplaces, lang=lang)
+    if sections:
+        for subdivision, rows in sections:
+            _append_spanning_row_6_6(measures, prototype, subdivision)
+            for values in rows:
+                row = _append_row(measures, prototype)
+                for cell, value in zip(row.cells, values):
+                    set_cell_text(cell, value)
+                _format_data_row_6_6(row, lang)
+    else:
+        for values in plan_rows_6_6(workplaces, lang=lang):
+            row = _append_row(measures, prototype)
+            for cell, value in zip(row.cells, values):
+                set_cell_text(cell, value)
+            _format_data_row_6_6(row, lang)
+
+    ppe_summary = _ppe_summary_6_6(company_data, lang)
+    if ppe_summary:
+        _append_spanning_row_6_6(measures, prototype, ppe_summary)
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(str(out_path))
+    return out_path
+
+
 # --- 6_4: сводная қайднома (итоги по подразделениям) ------------------------
 # Таблица 1 шаблона (13 grid-колонок):
 #   c0  — название строки/подразделения
@@ -367,24 +726,30 @@ def _aggregate_group_6_4(positions: list[dict], warnings: list[str]) -> dict[str
     return out
 
 
-def _group_positions_by_subdivision_6_4(positions: list[dict]) -> list[tuple[str, list[dict]]]:
-    """Группировка учтённых позиций по подразделению Перечня (одна группа = один блок).
+def _group_positions_by_subdivision_6_4(
+    positions: list[dict],
+) -> list[tuple[list[str], list[dict]]]:
+    """Собрать блоки 6_4 строго по физическим сериям строк «Перечня».
 
-    Ключ группировки — ``fold(subdivision_6_4)`` (не учитывает регистр/письмо/
-    ъ-ь опечатки); заголовок группы — сам текст разделительной строки Перечня.
+    Новый датасет несёт ``subdivision_group_6_4`` и полный список иерархических
+    заголовков. Для сохранённых старых датасетов используем соседние серии, но
+    никогда не объединяем одинаковые названия глобально через весь документ.
     """
-    order: list[str] = []
-    buckets: dict[str, list[dict]] = {}
-    labels: dict[str, str] = {}
+    groups: list[tuple[list[str], list[dict]]] = []
+    keys: list[tuple] = []
     for wp in positions:
-        sub = wp.get("subdivision_6_4", "") or "—"
-        key = fold(sub)
-        if key not in buckets:
-            buckets[key] = []
-            labels[key] = sub
-            order.append(key)
-        buckets[key].append(wp)
-    return [(labels[key], buckets[key]) for key in order]
+        headers = list(wp.get("subdivision_headers_6_4") or [])
+        if not headers:
+            headers = [wp.get("subdivision_6_4", "") or "—"]
+        explicit_group = wp.get("subdivision_group_6_4")
+        key = ("id", explicit_group) if explicit_group is not None else (
+            "legacy", tuple(fold(h) for h in headers)
+        )
+        if not groups or keys[-1] != key:
+            groups.append((headers, []))
+            keys.append(key)
+        groups[-1][1].append(wp)
+    return groups
 
 
 def _fill_numeric_row(row, vals: list[int]) -> None:
@@ -396,6 +761,47 @@ def _fill_numeric_row(row, vals: list[int]) -> None:
     cells = row.cells
     for i in range(1, min(13, len(cells))):
         set_cell_text(cells[i], "-" if not vals[i] else str(vals[i]))
+    seen: set[int] = set()
+    for cell in cells:
+        if id(cell._tc) in seen:
+            continue
+        seen.add(id(cell._tc))
+        cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+        for paragraph in cell.paragraphs:
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+
+def _format_group_heading_6_4(row, heading: str) -> None:
+    """Формат заголовка блока как в готовых 6.4.
+
+    Верхнеуровневые названия, набранные прописными, — жирные прямые; обычные
+    подразделения/участки — жирный курсив. Оба варианта центрированы.
+    """
+    letters = [char for char in heading if char.isalpha()]
+    is_upper_level = bool(letters) and all(char.isupper() for char in letters)
+    cell = row.cells[0]
+    cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+    for paragraph in cell.paragraphs:
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        for run in paragraph.runs:
+            run.bold = True
+            run.italic = not is_upper_level
+
+
+def _normalize_acronym_6_4(doc, lang: str) -> None:
+    """Привести профессиональную аббревиатуру к эталонному регистру."""
+    replacement = "YaTHV" if lang == "lat" else "ЯТҲВ"
+    pattern = re.compile(r"yathv" if lang == "lat" else r"ятҳв", re.IGNORECASE)
+    for table in doc.tables:
+        for row in table.rows:
+            seen: set[int] = set()
+            for cell in row.cells:
+                if id(cell._tc) in seen:
+                    continue
+                seen.add(id(cell._tc))
+                for paragraph in cell.paragraphs:
+                    for run in paragraph.runs:
+                        run.text = pattern.sub(replacement, run.text)
 
 
 def render_6_4(company_data: dict, workplaces: list[dict], out_path: str | Path,
@@ -403,25 +809,41 @@ def render_6_4(company_data: dict, workplaces: list[dict], out_path: str | Path,
                warnings: list[str] | None = None) -> Path:
     """Сформировать сводную қайднома 6_4 (итоги по подразделениям) из датасета.
 
-    Шаблон-ассет несёт готовые блоки подразделений (R10, R14, R18, … по 4
-    строки: заголовок + 3 строки данных). Логика на любой архив/«Перечень»:
-    * блок шаблона, чьё название совпало (после ``fold``) с подразделением из
-      «Перечня», — заполняется НА МЕСТЕ (сохраняя форматирование шаблона);
-    * подразделение «Перечня» без блока в шаблоне — добавляется новым блоком
-      в конец (сообщение в ``warnings``, данные не теряются);
-    * блок шаблона, которого НЕТ в «Перечне» этого архива (заготовка из чужого
-      шаблона), — УДАЛЯЕТСЯ, чтобы в итоге остались только нужные подразделения.
-    Итог: набор блоков всегда равен набору подразделений «Перечня» — независимо
-    от того, под какое учреждение изначально свёрстан шаблон.
+    Статическую шапку и прототипы строк берём из ассета, но тело всегда строим
+    заново по потоку «Перечня». Это сохраняет родительские/дочерние заголовки,
+    повторные одноимённые физические блоки и исходный порядок без зависимости
+    от названий подразделений компании, использованной в шаблоне.
     """
     if warnings is None:
         warnings = []
     doc = Document(str(template_path))
     _fill_reqs(doc.tables[0], company_data)
+    # Во всех изученных готовых 6.4 значения реквизитов жирные и центрированы.
+    reqs = doc.tables[0]
+    for row in reqs.rows[:4]:
+        cell = row.cells[2]
+        for paragraph in cell.paragraphs:
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            for run in paragraph.runs:
+                run.bold = True
+                if run.font.size is None:
+                    run.font.size = Pt(11)
+    if len(reqs.rows) > 4:
+        for index in (1, 3, 5):
+            if index >= len(reqs.rows[4].cells):
+                continue
+            cell = reqs.rows[4].cells[index]
+            for paragraph in cell.paragraphs:
+                paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                for run in paragraph.runs:
+                    run.bold = True
     summary = doc.tables[1]
 
     positions = [wp for wp in workplaces if "subdivision_6_4" in wp]
-    positions.sort(key=lambda w: workplace_sort_key(w.get("workplace_no", "")))
+    positions.sort(key=lambda w: (
+        w.get("perechen_order_6_4", 10**9),
+        workplace_sort_key(w.get("workplace_no", "")),
+    ))
 
     rows = list(summary.rows)
     total_data_rows = rows[4:7]  # «Корхона бўйича жами»: 3 строки данных
@@ -431,54 +853,59 @@ def render_6_4(company_data: dict, workplaces: list[dict], out_path: str | Path,
     for row_obj, kind in zip(total_data_rows, _ROW_KINDS):
         _fill_numeric_row(row_obj, totals[kind])
 
-    # Блоки подразделений шаблона: R10, R14, R18, … по 4 строки каждый.
-    block_starts = list(range(10, len(rows), 4))
     groups = _group_positions_by_subdivision_6_4(positions)
-    used: set[int] = set()
-    unused_block_rows: list = []  # строки пустых блоков шаблона — на удаление
-    # Прототип нового блока берём ДО удаления (deepcopy — не зависит от того,
-    # окажется ли исходный блок сматченным или удалённым).
-    header_proto = deepcopy(rows[block_starts[0]]._tr) if block_starts else None
-    data_protos = [deepcopy(r._tr) for r in rows[block_starts[0] + 1:block_starts[0] + 4]] if block_starts else []
-    for start in block_starts:
-        if start + 3 >= len(rows):
-            break
-        label = normalize_spaces(rows[start].cells[0].text)
-        match_idx = next(
-            (i for i, (name, _) in enumerate(groups) if i not in used and fold(name) == fold(label)),
-            None,
-        )
-        if match_idx is None:
-            # Такого подразделения нет в «Перечне» этого архива → блок на удаление.
-            unused_block_rows.extend(rows[start:start + 4])
-            continue
-        used.add(match_idx)
-        agg = _aggregate_group_6_4(groups[match_idx][1], warnings)
-        for row_obj, kind in zip(rows[start + 1:start + 4], _ROW_KINDS):
-            _fill_numeric_row(row_obj, agg[kind])
+    header_proto = deepcopy(rows[10]._tr) if len(rows) > 10 else None
+    data_protos = [deepcopy(r._tr) for r in rows[11:14]]
 
-    # Подразделения Перечня без блока в шаблоне — добавляем блок в конец,
-    # а не пропускаем молча (Шаг 2/7 спецификации).
-    if header_proto is not None:
-        for i, (name, members) in enumerate(groups):
-            if i in used:
-                continue
-            warnings.append(
-                f"Подразделение «{name}» из Перечня не найдено ни в одном блоке шаблона 6_4 — добавлен новый блок."
-            )
-            summary._tbl.append(deepcopy(header_proto))
-            set_cell_text(summary.rows[-1].cells[0], name)
-            agg = _aggregate_group_6_4(members, warnings)
-            for proto, kind in zip(data_protos, _ROW_KINDS):
-                summary._tbl.append(deepcopy(proto))
-                _fill_numeric_row(summary.rows[-1], agg[kind])
-
-    # Удаляем пустые блоки чужого шаблона (подразделения, которых нет в «Перечне»
-    # этого архива) — делаем это ПОСЛЕ добавления новых, чтобы не сбить индексы.
-    for row_obj in unused_block_rows:
+    # Готовые клиентские документы разделяют общий итог (7 строк) и перечень
+    # подразделений (повторная 3-строчная шапка) на отдельные таблицы.
+    subdivision_tbl = deepcopy(summary._tbl)
+    for tr in list(subdivision_tbl.tr_lst)[:7]:
+        subdivision_tbl.remove(tr)
+    # В готовых 6.4 общий итог всегда завершает первую страницу, а повторная
+    # шапка подразделений начинает следующую. Явный разрыв не оставляет шапку
+    # одиноко внизу первой страницы без первого блока данных.
+    page_break = OxmlElement("w:p")
+    p_pr = OxmlElement("w:pPr")
+    p_pr.append(OxmlElement("w:pageBreakBefore"))
+    spacing = OxmlElement("w:spacing")
+    spacing.set("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}before", "0")
+    spacing.set("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}after", "0")
+    spacing.set("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}line", "1")
+    spacing.set("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}lineRule", "exact")
+    p_pr.append(spacing)
+    page_break.append(p_pr)
+    summary._tbl.addnext(page_break)
+    page_break.addnext(subdivision_tbl)
+    subdivisions = Table(subdivision_tbl, summary._parent)
+    for row_obj in list(summary.rows)[7:]:
         summary._tbl.remove(row_obj._tr)
+    for row_obj in list(subdivisions.rows)[3:]:
+        subdivisions._tbl.remove(row_obj._tr)
+
+    for header_row in subdivisions.rows[:3]:
+        _prevent_row_split(header_row)
+
+    if header_proto is not None and len(data_protos) == 3:
+        for headers, members in groups:
+            for heading in headers or ["—"]:
+                row_obj = _append_row(subdivisions, header_proto)
+                set_cell_text(row_obj.cells[0], heading)
+                _format_group_heading_6_4(row_obj, heading)
+                _prevent_row_split(row_obj)
+                _keep_row_with_next(row_obj)
+            agg = _aggregate_group_6_4(members, warnings)
+            for index, (proto, kind) in enumerate(zip(data_protos, _ROW_KINDS)):
+                row_obj = _append_row(subdivisions, proto)
+                _fill_numeric_row(row_obj, agg[kind])
+                _prevent_row_split(row_obj)
+                if index < 2:
+                    _keep_row_with_next(row_obj)
+
+    _remove_trailing_empty_paragraphs(doc)
 
     _transliterate_doc(doc, lang)
+    _normalize_acronym_6_4(doc, lang)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(out_path))

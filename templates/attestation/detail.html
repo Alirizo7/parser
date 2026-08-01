@@ -55,6 +55,16 @@
       <a href="{% url 'attestation:download' batch.pk '6_4' %}"
          class="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700">Скачать .docx</a>
     </div>
+    {% if batch.output_6_6 %}
+    <div class="flex items-center justify-between rounded-xl border border-emerald-200 bg-emerald-50/50 p-5">
+      <div>
+        <p class="text-xs font-medium uppercase tracking-wide text-emerald-700">Документ</p>
+        <p class="mt-1 font-semibold text-slate-900">6_6 — тадбирлар режаси (план мероприятий)</p>
+      </div>
+      <a href="{% url 'attestation:download' batch.pk '6_6' %}"
+         class="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700">Скачать .docx</a>
+    </div>
+    {% endif %}
 
     {# Пять Excel-протоколов лабораторных замеров #}
     {% for which, title in excel_docs %}

@@ -83,6 +83,7 @@ _workplace_sort_key = E.workplace_sort_key
 # Поля, наследуемые «а»-суффиксным рабочим местом от базового
 _SUFFIX_COPY_FIELDS = (
     "factors", "substances", "benefits", "ppe_provided",
+    "plan_6_6",
     "injury_risk", "privileged_pension", "employees_count", "female_count",
     "injury_risk_class_6_4", "ppe_status_6_4", "ppe_not_envisaged_6_4",
     # Построчные замеры для Excel-протоколов (файлы 1–5)
@@ -142,6 +143,56 @@ def _fill_suffix_from_base(workplaces: list[dict], perechen_map: dict, warnings:
             f"{pno}: карта не найдена — рабочее место создано копированием базового "
             f"{base['workplace_no']}."
         )
+
+
+def _repair_duplicate_workplace_numbers_from_perechen(
+    workplaces: list[dict], perechen_map: dict[str, dict], warnings: list[str]
+) -> None:
+    """Исправить однозначную опечатку номера карты по должности из «Перечня».
+
+    Источник номера в карте остаётся главным. Исключение безопасно только при
+    одновременном выполнении трёх условий: номер карты продублирован, в
+    «Перечне» есть ещё не занятый номер, и нормализованное название должности
+    этой карты совпадает ровно с одной такой строкой. Неоднозначные случаи не
+    меняем и оставляем оператору обычное предупреждение о дубле.
+    """
+    counts = Counter(w.get("workplace_no", "") for w in workplaces)
+    duplicated = {no for no, count in counts.items() if no and count > 1}
+    if not duplicated or not perechen_map:
+        return
+
+    occupied = {
+        w.get("workplace_no", "") for w in workplaces
+        if w.get("workplace_no") and w.get("workplace_no") not in duplicated
+    }
+    available = set(perechen_map) - occupied
+    for old_no in sorted(duplicated, key=_workplace_sort_key):
+        records = [w for w in workplaces if w.get("workplace_no") == old_no]
+        assignments: list[tuple[dict, str]] = []
+        used: set[str] = set()
+        for rec in records:
+            position_key = fold(rec.get("position", ""))
+            candidates = [
+                no for no in available - used
+                if position_key and fold(perechen_map[no].get("position", "")) == position_key
+            ]
+            if len(candidates) == 1:
+                assignments.append((rec, candidates[0]))
+                used.add(candidates[0])
+        # Исправляем только если весь набор дублей разложился однозначно и без
+        # коллизий. Частичное угадывание могло бы скрыть ещё одну ошибку карты.
+        if len(assignments) != len(records) or len(used) != len(records):
+            continue
+        for rec, new_no in assignments:
+            if new_no == old_no:
+                continue
+            rec["workplace_no"] = new_no
+            rec.setdefault("flags", []).append("workplace_no_repaired_from_perechen")
+            warnings.append(
+                f"{rec.get('source_file', 'карта')}: дублированный номер {old_no} "
+                f"исправлен на {new_no} по точному совпадению должности в «Перечне»."
+            )
+        available -= used
 
 
 def run_pipeline(
@@ -216,14 +267,6 @@ def run_pipeline(
             f"Карты: найдено файлов {total}, распознано рабочих мест {len(workplaces)}. "
             f"НЕ РАСПОЗНАНЫ ({len(unrecognized)}): " + "; ".join(unrecognized)
         )
-    # Дубли номеров (карта могла перезаписать другую)
-    seen: dict[str, int] = {}
-    for rec in workplaces:
-        seen[rec["workplace_no"]] = seen.get(rec["workplace_no"], 0) + 1
-    dups = [no for no, c in seen.items() if c > 1]
-    if dups:
-        warnings.append("Повторяющиеся номера рабочих мест (проверьте карты): " + ", ".join(sorted(dups)))
-
     # 4) «Перечень» → коды должностей. Кандидатов может быть несколько
     # (напр. лист подписей «ИМЗО ПЕРЕЧЕН») — берём тот, что даёт больше записей.
     perechen_map: dict[str, dict] = {}
@@ -242,6 +285,17 @@ def run_pipeline(
                 best_perechen_docx = p_docx
     if not perechen_map:
         warnings.append("«Перечень» с кодами должностей не найден — коды останутся пустыми.")
+
+    # Исправляем только доказуемые опечатки: дублированный номер карты и ровно
+    # одно совпадение её должности с ещё не занятым номером «Перечня».
+    _repair_duplicate_workplace_numbers_from_perechen(workplaces, perechen_map, warnings)
+    seen = Counter(rec["workplace_no"] for rec in workplaces)
+    dups = [no for no, count in seen.items() if count > 1]
+    if dups:
+        warnings.append(
+            "Повторяющиеся номера рабочих мест (проверьте карты): "
+            + ", ".join(sorted(dups, key=_workplace_sort_key))
+        )
 
     # 4.5) «а»-суффиксные рабочие места (доп. место того же типа): если в карте
     # пусты факторы или карта отсутствует — наследуем данные базового номера.
@@ -288,6 +342,9 @@ def run_pipeline(
             if q:
                 pos = q.popleft()
                 rec["subdivision_6_4"] = pos["subdivision"]
+                rec["subdivision_headers_6_4"] = pos["subdivision_headers"]
+                rec["subdivision_group_6_4"] = pos["group_index"]
+                rec["perechen_order_6_4"] = pos["order"]
                 rec["employees_count_6_4"] = pos["employees_count"]
                 rec["female_count_6_4"] = pos["female_count"]
         missing = [(no, len(q)) for no, q in queues.items() if q]

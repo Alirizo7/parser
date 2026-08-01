@@ -85,6 +85,9 @@ def generate_documents(batch_id: int) -> None:
             batch.company_data, batch.extracted_data, out_dir / "6_4.docx", lang=lang,
             warnings=doc_warnings,
         )
+        p66 = render.render_6_6(
+            batch.company_data, batch.extracted_data, out_dir / "6_6.docx", lang=lang
+        )
         media_root = Path(settings.MEDIA_ROOT)
         # Пять Excel-протоколов: сбой одного НЕ должен ронять весь батч и терять
         # уже готовые docx — рендерим каждый в try, ошибку кладём в warnings.
@@ -108,6 +111,7 @@ def generate_documents(batch_id: int) -> None:
             output_5_1b=str(Path(p5).relative_to(media_root)),
             output_6_5=str(Path(p65).relative_to(media_root)),
             output_6_4=str(Path(p64).relative_to(media_root)),
+            output_6_6=str(Path(p66).relative_to(media_root)),
             output_excel_1=excel_rel.get(1, ""),
             output_excel_2=excel_rel.get(2, ""),
             output_excel_3=excel_rel.get(3, ""),
