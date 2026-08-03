@@ -1,7 +1,7 @@
 """Представления приложения «Авто-аттестация».
 
 Экраны: дашборд → загрузка → прогресс (HTMX-поллинг) → ревью (инлайн-правка
-с подсветкой флагов) → скачивание двух документов.
+с подсветкой флагов) → скачивание сформированных документов.
 """
 from __future__ import annotations
 
@@ -245,6 +245,7 @@ def download(request, pk, which):
         "5_1b": batch.output_5_1b,
         "6_5": batch.output_6_5,
         "6_4": batch.output_6_4,
+        "6_6": batch.output_6_6,
         "excel_1": batch.output_excel_1,
         "excel_2": batch.output_excel_2,
         "excel_3": batch.output_excel_3,
@@ -260,6 +261,7 @@ def download(request, pk, which):
         "5_1b": "5_1б.docx",
         "6_5": "6_5_заключение.docx",
         "6_4": "6_4_йиғма_қайднома.docx",
+        "6_6": "6_6_тадбирлар_режаси.docx",
         "excel_1": "1_Зарарли_моддалар.xlsx",
         "excel_2": "2_Физик_омиллар.xlsx",
         "excel_3": "3_Микроиқлим.xlsx",

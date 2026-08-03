@@ -116,6 +116,7 @@ _TO_CYR_SINGLE = {
     "p": "п", "r": "р", "s": "с", "t": "т", "u": "у", "f": "ф", "x": "х",
     "y": "й", "q": "қ", "h": "ҳ", "c": "к", "w": "в",
 }
+_VOWELS_LAT = "aeiou"
 
 
 def to_cyrillic(text: str) -> str:
@@ -139,11 +140,19 @@ def to_cyrillic(text: str) -> str:
         if matched:
             continue
         low = ch.lower()
-        if low in _TO_CYR_SINGLE:
+        if low == "e":
+            # Узбекское «э» пишется в начале слова и после гласной:
+            # Elektromagnit → Электромагнит, aerozol → аэрозол.
+            prev = s[i - 1] if i > 0 else ""
+            cyr = "э" if (not prev.isalpha() or prev.lower() in _VOWELS_LAT) else "е"
+            out.append(cyr.upper() if ch.isupper() else cyr)
+        elif low in _TO_CYR_SINGLE:
             cyr = _TO_CYR_SINGLE[low]
             out.append(cyr.upper() if ch.isupper() else cyr)
         elif ch in _APOSTROPHES:
-            pass  # tutuq между буквами — опускаем (после oʻ/gʻ уже обработан)
+            # После o/g апостроф уже поглощён диграфом выше. В остальных
+            # позициях это tutuq belgisi: ta'sir → таъсир, me'yor → меъёр.
+            out.append("ъ")
         else:
             out.append(ch)
         i += 1

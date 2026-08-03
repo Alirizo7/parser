@@ -5,9 +5,9 @@
 ```
 zip ──▶ unpack ──▶ convert (.doc→.docx) ──▶ extract (карты + «Перечень») ──▶ единый датасет
                                                                                    │
-                                            ┌──────────────────────────────────────┼─────────────────────┐
-                                     render_5_1b                            render_6_5             render_6_4
-                                 (вредные вещества)                  (сводная, 25 колонок)  (итоги по подразделениям)
+                                            ┌──────────────────┬───────────────────┼──────────────┬──────────────────┐
+                                     render_5_1b        render_6_5          render_6_4       render_6_6
+                                 (вредные вещества)   (25 колонок)   (итоги по отделам)  (план мероприятий)
 ```
 
 Сервисный слой (`attestation/services/`) не импортирует Django — функции принимают
@@ -57,7 +57,10 @@ zip ──▶ unpack ──▶ convert (.doc→.docx) ──▶ extract (кар�
    настоящие горизонтальные слияния ячеек на всю ширину). Раздача картам через
    `dict[str, deque]` — дубли номеров (две карты одной «а»-позиции на разные смены)
    раскладываются по очереди, не схлопываются. Карта получает `subdivision_6_4`,
-   `employees_count_6_4`, `female_count_6_4`. Строка Перечня без карты — исключается
+   полный список `subdivision_headers_6_4`, физический индекс
+   `subdivision_group_6_4`, `perechen_order_6_4`, `employees_count_6_4` и
+   `female_count_6_4`. Каждый разделитель и повторный одноимённый блок остаются
+   отдельными и идут в исходном порядке. Строка Перечня без карты — исключается
    из 6_4 с громким warning (сознательно НЕ синтезируется, в отличие от шага 4.5:
    там подмена подтверждена эталонами для 6_5/5_1б).
 9. **Шаг 5.1 — коды для «а»-суффиксов**: «Перечень» обычно не содержит строку
@@ -75,7 +78,7 @@ zip ──▶ unpack ──▶ convert (.doc→.docx) ──▶ extract (кар�
 
 - `company_data: JSONField(dict)`, `extracted_data: JSONField(list)`
 - `output_lang`: `cyr` (дефолт) | `lat` — язык выходных документов
-- `output_5_1b / output_6_5 / output_6_4`: пути к готовым .docx **относительно MEDIA_ROOT**
+- `output_5_1b / output_6_5 / output_6_4 / output_6_6`: пути к готовым .docx **относительно MEDIA_ROOT**
 - `stage`: текстовый этап для прогресс-бара (напр. `"Конвертация 12/41"`)
 - `error`: **двойное назначение** — при `failed` текст исключения, при успешном
   извлечении сюда пишутся warnings пайплайна через `"\n"` (UI показывает их янтарной
@@ -90,7 +93,7 @@ zip ──▶ unpack ──▶ convert (.doc→.docx) ──▶ extract (кар�
   пишет `stage` в БД точечным `queryset.update()`) → статус EXTRACTED, датасет и
   warnings в модель. Исключение → FAILED + текст в `error`. В `finally` —
   `connection.close()` (обязательно для thread-раннера).
-- `generate_documents(batch_id)`: статус PROCESSING → три `render_*` с
+- `generate_documents(batch_id)`: статус PROCESSING → четыре Word-`render_*` с
   `lang=batch.output_lang` → статус DONE + относительные пути. Только `render_6_4`
   принимает мутируемый список `warnings` — они доклеиваются к `batch.error`.
 - `_dispatch(job_name, batch_id)`: если `settings.ATTESTATION_TASK_RUNNER == "celery"` —
@@ -110,7 +113,7 @@ media/
   batches/<id>/
     work/unpacked/…                        # распакованный архив (структура сохранена)
     work/docx/…                            # результаты конвертации .doc→.docx
-    5_1b.docx  6_5.docx  6_4.docx          # готовые документы
+    5_1b.docx  6_5.docx  6_4.docx  6_6.docx  # готовые документы
 ```
 
 ## Поток статусов и UI
@@ -121,7 +124,7 @@ upload POST → Batch(UPLOADED) → start_processing → detail-страница
   → пока PROCESSING: свежий фрагмент (stage + percent из "N/M")
   → иначе: 204 + заголовок HX-Redirect → полная перезагрузка detail
 EXTRACTED → экран ревью (инлайн-правка) → POST generate → снова PROCESSING → DONE
-DONE → карточки скачивания трёх документов (download отдаёт FileResponse)
+DONE → карточки скачивания четырёх документов (download отдаёт FileResponse)
 ```
 
 Подробности экранов — в `06-WEB-UI.md`.

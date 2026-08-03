@@ -19,6 +19,7 @@ from docx import Document
 from . import mapping as M
 from .normalize import (
     canon_yesno,
+    class_rank,
     clean_substance_name,
     fold,
     fold_contains,
@@ -41,6 +42,12 @@ _CARD_FILENAME_RE = re.compile(
 
 def canonical_workplace_no(number: int, suffix: str = "") -> str:
     """Каноничный номер рабочего места: 6 цифр + опц. суффикс-вариант."""
+    # В старых картах один и тот же суффикс набран то латинской ``a``, то
+    # кириллической ``а``. Для человека это одно РМ, а без канонизации pipeline
+    # создавал две записи (реальный БНПЗ: 71 вместо 60).
+    suffix = (suffix or "").lower()
+    if suffix == "a":
+        suffix = "а"
     return f"{number:06d}{suffix}"
 
 
@@ -49,7 +56,10 @@ def split_workplace_no(wp: str) -> tuple[int | None, str]:
     m = re.match(r"^0*(\d+)\s*([^\d\s]*)\s*$", wp or "")
     if not m:
         return None, ""
-    return int(m.group(1)), m.group(2)
+    suffix = m.group(2).lower()
+    if suffix == "a":
+        suffix = "а"
+    return int(m.group(1)), suffix
 
 
 def workplace_sort_key(wp: str) -> tuple[int, str]:
@@ -192,7 +202,10 @@ def _extract_codes(grid: list[list[str]]) -> dict:
 
 def extract_company_data(doc: Doc) -> dict:
     grid = find_table(doc.tables, M.COMPANY_FIELDS["name"])
-    data = {k: "" for k in (*M.COMPANY_FIELDS, "stir", "ifut", "mxbt")}
+    data = {k: "" for k in (
+        *M.COMPANY_FIELDS, "stir", "ifut", "mxbt",
+        "ppe_mandatory_6_6", "ppe_additional_6_6",
+    )}
     if grid is None:
         return data
 
@@ -202,7 +215,37 @@ def extract_company_data(doc: Doc) -> dict:
             data[key] = _reqs_value(row, anchor)
 
     data.update(_extract_codes(grid))
+    data.update(_extract_ppe_bases_6_6(doc))
     return data
+
+
+def _extract_ppe_bases_6_6(doc: Doc) -> dict[str, str]:
+    """Нормативные основания ЯТҲВ для заключительных строк плана 6.6.
+
+    В картах это отдельная двухколоночная таблица перед перечнем СИЗ:
+    ``Мажбурий | <отраслевой норматив>`` и опционально
+    ``Қўшимча | <коллективный договор>``. Готовые 6.6 переносят эти основания
+    в конец плана один раз для всей организации.
+    """
+    result = {"ppe_mandatory_6_6": "", "ppe_additional_6_6": ""}
+    labels = {
+        "majburiy": "ppe_mandatory_6_6",
+        "qoshimcha": "ppe_additional_6_6",
+    }
+    for grid in doc.tables:
+        for row in grid:
+            if not row:
+                continue
+            label = fold(row[0]).rstrip(":")
+            key = labels.get(label)
+            if key is None:
+                continue
+            for cell in row[1:]:
+                value = normalize_spaces(cell)
+                if value:
+                    result[key] = value
+                    break
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -830,6 +873,14 @@ def extract_card(docx_path: str | Path, basename: str) -> dict:
     factors = _factor_values(grid, factor_rows) if grid else {}
     substances = _extract_substances(factor_rows)
 
+    # 6.6 не только проверяет итоговый класс «Тяжесть», но и дословно переносит
+    # фактическую рабочую позу из строки 1.14.13 внутрь мероприятия.
+    severity_posture = ""
+    for fr in factor_rows:
+        if fr.section == "1.14.13" and class_rank(fr.cls) >= 30 and not is_empty(fr.actual):
+            severity_posture = normalize_spaces(fr.actual)
+            break
+
     # Построчные замеры для Excel-протоколов лаб. замеров (файлы 2–5). Файл 1
     # берёт norma/actual/cls из substances выше. См. mapping.*_SECTIONS.
     physical_measurements = _extract_physical_measurements(factor_rows)
@@ -883,6 +934,7 @@ def extract_card(docx_path: str | Path, basename: str) -> dict:
         "job_code": "",  # заполняется из «Перечня» на этапе слияния
         "factors": factors,
         "substances": substances,
+        "plan_6_6": {"severity_posture": severity_posture},
         "ppe_provided": ppe,
         "benefits": benefits,
         "injury_risk": injury_risk,
@@ -911,6 +963,31 @@ def extract_card(docx_path: str | Path, basename: str) -> dict:
 # выпадали из 6_4 вместе со своими людьми (Sud-tibbiyot: строка «000012a» на
 # 5 чел./2 жен. терялась, Morfalogiya давала 7/6 вместо 12/8).
 _PERECHEN_WP_RE = re.compile(r"^\d{4,6}[а-яёА-ЯЁa-zA-Z]?$")
+
+
+def _workplace_no_from_perechen_cell(value: str) -> tuple[str, bool]:
+    """Извлечь каноничный номер РМ из первой ячейки строки «Перечня».
+
+    В исправном документе ячейка содержит только номер. В реальных старых
+    ``.doc`` после конвертации встречается дефект границы ячеек: название
+    предыдущего подразделения и номер склеены без пробела, например
+    ``"... bo'limi001203"``. Такой номер восстанавливаем только когда 4–6 цифр
+    примыкают непосредственно к букве в конце строки. Это не принимает обычные
+    названия подразделений с отдельным кодом через пробел (``"... 05002"``).
+
+    Возвращает ``(номер, recovered)``; пустой номер означает, что строка не
+    является позицией.
+    """
+    raw = normalize_spaces(value)
+    if _PERECHEN_WP_RE.fullmatch(raw):
+        number, suffix = split_workplace_no(raw)
+        return (canonical_workplace_no(number, suffix), False) if number is not None else ("", False)
+
+    glued = re.search(r"(?<=[^\W\d_])(\d{4,6}[а-яёА-ЯЁa-zA-Z]?)$", raw)
+    if not glued:
+        return "", False
+    number, suffix = split_workplace_no(glued.group(1))
+    return (canonical_workplace_no(number, suffix), True) if number is not None else ("", False)
 
 
 def _perechen_header_columns(grid: list[list[str]]) -> dict[str, int]:
@@ -953,8 +1030,8 @@ def parse_perechen(docx_path: str | Path) -> dict[str, dict]:
     for row in grid:
         if workplace_col >= len(row):
             continue
-        wp = normalize_spaces(row[workplace_col])
-        if not _PERECHEN_WP_RE.match(wp):
+        wp, _recovered = _workplace_no_from_perechen_cell(row[workplace_col])
+        if not wp:
             continue
         result[wp] = {
             "job_code": normalize_spaces(row[code_col]) if code_col < len(row) else "",
@@ -967,8 +1044,9 @@ def parse_perechen(docx_path: str | Path) -> dict[str, dict]:
 def parse_perechen_positions_6_4(docx_path: str | Path) -> tuple[list[dict], list[str]]:
     """Вернуть позиции Перечня по порядку документа для сборки 6_4.
 
-    Каждая позиция: ``{workplace_no, subdivision, employees_count,
-    female_count}``. Подразделение определяется строками-разделителями —
+    Каждая позиция содержит номер, численность, исходный порядок, индекс блока
+    и полный список предшествующих заголовков. Подразделение определяется
+    строками-разделителями —
     НАСТОЯЩИМИ горизонтальными слияниями ячеек на всю ширину таблицы (все
     ячейки строки указывают на один и тот же ``<w:tc>``), а не эвристикой по
     тексту — это надёжно отличает их от обычных строк данных независимо от
@@ -976,16 +1054,12 @@ def parse_perechen_positions_6_4(docx_path: str | Path) -> tuple[list[dict], lis
     одного номера (напр. две карты одной "а"-позиции на разные смены)
     сохраняются как отдельные позиции, не схлопываются в одну (Шаг 3/5).
 
-    ⚠️ Разделителей может быть НЕСКОЛЬКО ПОДРЯД: у Узтелекома «Перечень» несёт
-    двухуровневую иерархию отдельными строками-слияниями («Buxoro bo'limi» +
-    «Boshqaruv apparati»), и уровень строки ничем не размечен (все они жирные,
-    по центру, одного кегля). Подряд идущие разделители СКЛЕИВАЕМ в одно
-    название через пробел — так же, как выглядит подразделение в карте (и,
-    значит, в 6_5). Иначе оставался бы только последний уровень, и разные
-    физические участки с одноимённым вторым уровнем («Boshqaruv apparati»
-    Бухоро и Навои, «Liniya-kabel xo'jaligi guruhi» пяти участков)
-    схлопывались бы в один блок 6_4 — группировка там глобальная по
-    ``fold(subdivision_6_4)``. Каждая склейка сообщается в ``warnings``.
+    Разделителей может быть НЕСКОЛЬКО ПОДРЯД: это не одно длинное название, а
+    иерархия отдельных полноширинных строк 6_4 (родитель → дочерний раздел →
+    три строки итогов). Поэтому сохраняем каждый заголовок отдельно и начинаем
+    новый агрегатный блок при следующей серии позиций. Даже одинаковые названия,
+    встретившиеся позже, не объединяем: готовые клиентские 6.4 повторяют именно
+    физический порядок строк «Перечня».
     """
     document = Document(str(docx_path))
     warnings: list[str] = []
@@ -998,53 +1072,36 @@ def parse_perechen_positions_6_4(docx_path: str | Path) -> tuple[list[dict], lis
     workplace_col, workers_col, female_col = cols["workplace"], cols["workers"], cols["female"]
 
     positions: list[dict] = []
-    current_sub = ""
-    prev_row_was_separator = False
+    pending_headers: list[str] = []
+    current_headers: list[str] = []
+    group_index = -1
     for row in table.rows:
         cells = row.cells
         text0 = normalize_spaces(cells[0].text) if cells else ""
         is_merged_full_row = len({id(c._tc) for c in cells}) == 1
-        if is_merged_full_row and text0 and not _PERECHEN_WP_RE.match(text0):
-            if prev_row_was_separator:
-                current_sub = f"{current_sub} {text0}".strip()
-                warnings.append(
-                    f"6_4: строки-разделители «Перечня» идут подряд — название "
-                    f"подразделения склеено в «{current_sub}»."
-                )
-            else:
-                current_sub = text0
-            prev_row_was_separator = True
+        if is_merged_full_row and text0 and not _PERECHEN_WP_RE.fullmatch(text0):
+            pending_headers.append(text0)
             continue
-        prev_row_was_separator = False
-        wp = normalize_spaces(cells[workplace_col].text) if workplace_col < len(cells) else ""
-        if not _PERECHEN_WP_RE.match(wp):
+        raw_wp = normalize_spaces(cells[workplace_col].text) if workplace_col < len(cells) else ""
+        wp, recovered = _workplace_no_from_perechen_cell(raw_wp)
+        if not wp:
             continue
+        if pending_headers or group_index < 0:
+            current_headers = list(pending_headers)
+            pending_headers.clear()
+            group_index += 1
+        if recovered:
+            warnings.append(
+                f"6_4: номер рабочего места {wp} восстановлен из склеенной "
+                f"ячейки «Перечня» «{raw_wp}»."
+            )
         positions.append({
             "workplace_no": wp,
-            "subdivision": current_sub,
+            "subdivision": current_headers[-1] if current_headers else "",
+            "subdivision_headers": list(current_headers),
+            "group_index": group_index,
+            "order": len(positions),
             "employees_count": normalize_number(cells[workers_col].text) if workers_col < len(cells) else "",
             "female_count": normalize_number(cells[female_col].text) if female_col < len(cells) else "",
         })
-
-    # Одно и то же название встретилось В РАЗНЫХ местах «Перечня» (между ними был
-    # другой разделитель). Группировка 6_4 — глобальная по ``fold``, поэтому такие
-    # строки СОЛЬЮТСЯ в один блок. Иногда это верно (у Узтелекома карты 000004 и
-    # 000013–15 обе называют подразделение просто «Avtotransport uchastkasi»), а
-    # иногда нет (одноимённый «Telekommunikatsiya … guruhi» Навои и Кизилтепы —
-    # разные участки, в карте различаются префиксом). Из «Перечня» отличить их
-    # нечем: уровень строки-разделителя там ничем не размечен. Поэтому не гадаем,
-    # а громко сообщаем оператору — пусть сверит с картами.
-    runs: list[str] = []
-    for pos in positions:
-        key = fold(pos["subdivision"])
-        if not runs or runs[-1] != key:
-            runs.append(key)
-    for key in {k for k in runs if runs.count(k) > 1}:
-        members = [p["workplace_no"] for p in positions if fold(p["subdivision"]) == key]
-        name = next(p["subdivision"] for p in positions if fold(p["subdivision"]) == key)
-        warnings.append(
-            f"6_4: подразделение «{name}» встречается в «Перечне» несколько раз "
-            f"с разрывом — в 6_4 эти позиции попадут в ОДИН блок "
-            f"({', '.join(members)}); проверьте по картам, не разные ли это участки."
-        )
     return positions, warnings
