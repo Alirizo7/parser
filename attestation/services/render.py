@@ -927,7 +927,7 @@ EXCEL_CFG = {
     2: dict(ncols=11, managed_start=27, group_row=30, block_start=31, block_len=4),
     3: dict(ncols=11, managed_start=24, group_row=27, block_start=28, block_len=9),
     4: dict(ncols=11, managed_start=24, group_row=27, block_start=28, block_len=5),
-    5: dict(ncols=11, managed_start=24, group_row=None, block_start=28, block_len=16),
+    5: dict(ncols=11, managed_start=24, group_row=27, block_start=28, block_len=16),
 }
 
 # Метки строки-заказчика в шапке (двуязычные: файл 1 — узб. латиница, 2–5 — рус.)
@@ -1278,7 +1278,7 @@ def render_excel_4(company_data, workplaces, out_path, *, template_path=None, la
 
 
 def render_excel_5(company_data, workplaces, out_path, *, template_path=None, lang="cyr") -> Path:
-    """Файл 5 — магнитные поля / ЭМИ (без группировки; только РМ с замером 1.4.x)."""
+    """Файл 5 — магнитные поля / ЭМИ (по отделам; только РМ с замером 1.4.x)."""
     return _render_excel_blocks(company_data, workplaces, out_path, idx=5,
                                 subrows_of=_subrows_file5, final_of=_final_file5,
-                                include=_has_em, grouped=False, lang=lang)
+                                include=_has_em, grouped=True, lang=lang)
