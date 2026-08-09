@@ -150,6 +150,31 @@ def _remove_trailing_empty_paragraphs(doc) -> None:
             body.remove(child)
 
 
+def _remove_content_after_table(doc, table: Table) -> None:
+    """Удалить служебный хвост шаблона после указанной таблицы.
+
+    Ассет 6_5 был получен из готового клиентского файла и содержал после
+    сводной таблицы скан подписей конкретной организации. Одного удаления
+    абзаца недостаточно: картинка останется внутри DOCX как доступное вложение.
+    Поэтому вместе с XML-узлом удаляем его image relationship из пакета.
+    """
+    body = doc._element.body
+    children = list(body.iterchildren())
+    try:
+        table_index = children.index(table._tbl)
+    except ValueError:
+        return
+
+    for child in children[table_index + 1:]:
+        if child.tag.endswith("}sectPr"):
+            continue
+        image_rel_ids = child.xpath(".//a:blip/@r:embed")
+        body.remove(child)
+        for rel_id in image_rel_ids:
+            if rel_id in doc.part.rels:
+                doc.part.drop_rel(rel_id)
+
+
 def _pct_num(value: str) -> str:
     m = re.search(r"\d+", value or "")
     return m.group(0) if m else ""
@@ -238,8 +263,12 @@ def row_values_6_5(rec: dict) -> list[str]:
     vals = [""] * 26
     vals[0] = rec.get("workplace_no", "")
     # Должность в 6_5 — из «Перечня» (как в эталонах клиента); иначе из карты
-    vals[1] = rec.get("position_from_perechen") or rec.get("position", "")
-    vals[2] = rec.get("job_code", "")
+    vals[1] = (
+        rec.get("position_from_perechen_6_5")
+        or rec.get("position_from_perechen")
+        or rec.get("position", "")
+    )
+    vals[2] = rec.get("job_code_6_5") or rec.get("job_code", "")
     for ci, key in _FACTOR_COLS:
         vals[ci] = f.get(key, "-") or "-"
     # Травмоопасность — из п.2.3 карты (то же поле, что считает 6_4); эвристика
@@ -295,6 +324,41 @@ def _group_by_subdivision(workplaces: list[dict]) -> list[tuple[str, list[dict]]
     return groups
 
 
+def _group_by_subdivision_6_5(workplaces: list[dict]) -> list[tuple[str, list[dict]]]:
+    """Сгруппировать 6_5 по физическим блокам Перечня.
+
+    Название подразделения из карты остаётся фолбэком для архивов без
+    Перечня. Когда Перечень разобран, его заголовок является авторитетным и не
+    дробит один блок из-за регистра или опечатки в отдельных картах.
+    """
+    groups: list[tuple[str, list[dict]]] = []
+    for wp in workplaces:
+        sub = wp.get("subdivision_6_5") or wp.get("subdivision") or "—"
+        if not groups or groups[-1][0] != sub:
+            groups.append((sub, []))
+        groups[-1][1].append(wp)
+    return groups
+
+
+def _format_data_row_6_5(row) -> None:
+    """Применить формат тела 6_5 из заполненных клиентских эталонов."""
+    seen: set[int] = set()
+    position_tc = id(row.cells[1]._tc) if len(row.cells) > 1 else None
+    for cell in row.cells:
+        marker = id(cell._tc)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+        for paragraph in cell.paragraphs:
+            paragraph.alignment = (
+                WD_ALIGN_PARAGRAPH.LEFT if marker == position_tc else WD_ALIGN_PARAGRAPH.CENTER
+            )
+            for run in paragraph.runs:
+                run.bold = False
+                run.font.size = Pt(9)
+
+
 def render_6_5(company_data: dict, workplaces: list[dict], out_path: str | Path,
                *, template_path: str | Path = TEMPLATE_6_5, lang: str = "cyr") -> Path:
     """Сформировать сводный документ 6_5 из датасета.
@@ -311,8 +375,15 @@ def render_6_5(company_data: dict, workplaces: list[dict], out_path: str | Path,
     _fill_reqs(doc.tables[0], company_data)
     summary = doc.tables[1]
 
-    # Гарантируем порядок РМ (а-суффикс сразу после базового), независимо от входа
-    workplaces = sorted(workplaces, key=lambda w: workplace_sort_key(w.get("workplace_no", "")))
+    # При наличии Перечня повторяем его физический порядок. Карты, которых в
+    # Перечне нет, не теряем и ставим после него в обычном порядке номеров.
+    def order_6_5(wp: dict):
+        order = wp.get("perechen_order_6_5")
+        if isinstance(order, int):
+            return (0, order, workplace_sort_key(wp.get("workplace_no", "")))
+        return (1, 10**9, workplace_sort_key(wp.get("workplace_no", "")))
+
+    workplaces = sorted(workplaces, key=order_6_5)
 
     rows = list(summary.rows)
     group_proto = deepcopy(rows[3]._tr)  # заголовок группы (спанящая ячейка)
@@ -320,16 +391,23 @@ def render_6_5(company_data: dict, workplaces: list[dict], out_path: str | Path,
     for row in rows[3:]:                 # очищаем тело ниже 3-уровневой шапки
         summary._tbl.remove(row._tr)
 
-    for sub, members in _group_by_subdivision(workplaces):
+    for sub, members in _group_by_subdivision_6_5(workplaces):
         header = _append_row(summary, group_proto)
         set_cell_text(header.cells[0], sub)
+        _prevent_row_split(header)
+        _keep_row_with_next(header)
         for wp in members:
             row = _append_row(summary, data_proto)
             cells = row.cells
             for ci, val in enumerate(row_values_6_5(wp)):
                 if ci < len(cells):
                     set_cell_text(cells[ci], val)
+            _format_data_row_6_5(row)
+            _prevent_row_split(row)
 
+    # Не переносим в новый документ скан подписей организации-примера,
+    # оставшийся в исходном шаблоне после сводной таблицы.
+    _remove_content_after_table(doc, summary)
     _transliterate_doc(doc, lang)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)

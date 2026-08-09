@@ -321,6 +321,43 @@ def run_pipeline(
         if not rec.get("substances"):
             rec["flags"].append("substances_missing")
 
+    # 5.04) 6_5 получает должность, код, подразделение и порядок из отдельного
+    # логического чтения Перечня. Это изолирует исправление от остальных
+    # документов: старые .doc иногда дублируют каждую физическую ячейку после
+    # конвертации, из-за чего общий индексный разбор сдвигает должность/код.
+    if best_perechen_docx is not None:
+        try:
+            perechen_positions_6_5, w = E.parse_perechen_positions_6_5(best_perechen_docx)
+        except Exception as exc:  # noqa: BLE001
+            perechen_positions_6_5, w = [], [f"6_5: не удалось разобрать «Перечень»: {exc}"]
+        warnings.extend(w)
+
+        queues_6_5: dict[str, deque] = {}
+        first_6_5: dict[str, dict] = {}
+        for pos in perechen_positions_6_5:
+            no = pos["workplace_no"]
+            queues_6_5.setdefault(no, deque()).append(pos)
+            first_6_5.setdefault(no, pos)
+
+        for rec in workplaces:
+            no = rec["workplace_no"]
+            q = queues_6_5.get(no)
+            pos = q.popleft() if q else first_6_5.get(no)
+            if pos is None:
+                number, suffix = split_workplace_no(no)
+                if number is not None and suffix:
+                    pos = first_6_5.get(E.canonical_workplace_no(number))
+            if pos is None:
+                continue
+            rec["position_from_perechen_6_5"] = pos["position"]
+            rec["job_code_6_5"] = pos["job_code"]
+            rec["subdivision_6_5"] = pos["subdivision"]
+            rec["subdivision_headers_6_5"] = pos["subdivision_headers"]
+            rec["subdivision_group_6_5"] = pos["group_index"]
+            rec["perechen_order_6_5"] = pos["order"]
+    elif perechen_candidates:
+        warnings.append("6_5: не удалось выбрать «Перечень» — используются данные карт.")
+
     # 5.05) 6_4: позиции берутся из строк «Перечня» (не из карт) — Шаг 3/4/5
     # спецификации. Сопоставляем каждую строку Перечня со «своей» картой по
     # номеру рабочего места; дубли номеров (напр. две карты одной «а»-позиции
