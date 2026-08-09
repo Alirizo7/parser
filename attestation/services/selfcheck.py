@@ -136,6 +136,16 @@ _REQS_FIELDS = {
 }
 
 
+def _canonical_6_5_no(value: str) -> str:
+    """Канонизировать ключ РМ для 6_5 (латинская ``a`` = кириллическая ``а``)."""
+    raw = normalize_spaces(value)
+    match = re.fullmatch(r"0*(\d+)([aAаА]?)", raw)
+    if not match:
+        return raw
+    suffix = "а" if match.group(2) else ""
+    return f"{int(match.group(1)):06d}{suffix}"
+
+
 def _read_6_5(docx_path):
     """Вернуть (реквизиты, {workplace_no: [значения 26 колонок]})."""
     doc = Document(str(docx_path))
@@ -165,7 +175,7 @@ def _read_6_5(docx_path):
     for r in range(len(summary.rows)):
         c0 = cell(summary, r, 0)
         if re.match(r"^\d{6}", c0):
-            data[c0] = [cell(summary, r, c) for c in range(26)]
+            data[_canonical_6_5_no(c0)] = [cell(summary, r, c) for c in range(26)]
     return reqs, data
 
 
@@ -217,6 +227,8 @@ def _cells_equal(col: int, ref: str, gen: str) -> bool:
     """Сравнение ячеек. Должность (c1) сверяем без учёта дефисов/пробелов:
     в эталоне в неё вручную вставлены переносы-дефисы (``ҳисоб-лаш``,
     ``меҳ-нат``) для узкой колонки — содержание при этом совпадает."""
+    if col == 0:
+        return _canonical_6_5_no(ref) == _canonical_6_5_no(gen)
     if col == 1:
         norm = lambda s: re.sub(r"[-­\s]+", "", normalize_spaces(s)).lower()
         return norm(ref) == norm(gen)
@@ -271,7 +283,7 @@ def _read_6_5_logical(path):
             logical = cells[0:22] + [cells[22], cells[24], cells[25]]
         else:        # эталон клиента: 25 колонок 1:1
             logical = (cells + [""] * 25)[0:25]
-        data[c0] = logical
+        data[_canonical_6_5_no(c0)] = logical
 
     reqs = {}
     for r in range(len(reqs_tbl.rows)):
@@ -289,6 +301,8 @@ def _read_6_5_logical(path):
 
 
 def _logical_equal(i: int, gen: str, ref: str) -> bool:
+    if i == 0:
+        return _canonical_6_5_no(gen) == _canonical_6_5_no(ref)
     if i == 1:  # должность — без дефисов/пробелов, в общем письме
         norm = lambda s: re.sub(r"[-­\s]+", "", fold(s))
         return norm(gen) == norm(ref)

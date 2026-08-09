@@ -1040,6 +1040,76 @@ def parse_perechen(docx_path: str | Path) -> dict[str, dict]:
     return result
 
 
+# --- 6_5: логические позиции Перечня независимо от дефектов старого .doc ----
+def parse_perechen_positions_6_5(docx_path: str | Path) -> tuple[list[dict], list[str]]:
+    """Вернуть должность, код и подразделение для строк 6_5.
+
+    В части старых ``.doc`` после конвертации каждая логическая ячейка строки
+    оказывается горизонтально объединена с соседней. ``python-docx`` тогда
+    возвращает один и тот же ``<w:tc>`` дважды: фиксированные индексы читают
+    номер РМ как должность, а должность — как код. Для 6_5 читаем уникальные
+    физические ячейки строки в исходном порядке; в Перечне первые три
+    логические ячейки неизменно означают номер, должность и код.
+
+    Эта функция намеренно отдельная: она не меняет общий ``parse_perechen`` и
+    данные, которые уже используют остальные документы и Excel-протоколы.
+    """
+    document = Document(str(docx_path))
+    warnings: list[str] = []
+    table = max(document.tables, key=lambda t: len(t.rows), default=None)
+    if table is None:
+        return [], ["«Перечень»: таблица позиций не найдена (6_5)."]
+
+    positions: list[dict] = []
+    pending_headers: list[str] = []
+    current_headers: list[str] = []
+    group_index = -1
+
+    for row in table.rows:
+        physical_cells = []
+        seen: set[int] = set()
+        for cell in row.cells:
+            marker = id(cell._tc)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            physical_cells.append(cell)
+        values = [normalize_spaces(cell.text) for cell in physical_cells]
+        if not values:
+            continue
+
+        text0 = values[0]
+        is_merged_full_row = len(physical_cells) == 1
+        if is_merged_full_row and text0 and not _PERECHEN_WP_RE.fullmatch(text0):
+            pending_headers.append(text0)
+            continue
+
+        wp, recovered = _workplace_no_from_perechen_cell(text0)
+        if not wp:
+            continue
+        if pending_headers or group_index < 0:
+            current_headers = list(pending_headers)
+            pending_headers.clear()
+            group_index += 1
+        if recovered:
+            warnings.append(
+                f"6_5: номер рабочего места {wp} восстановлен из склеенной "
+                f"ячейки «Перечня» «{text0}»."
+            )
+
+        positions.append({
+            "workplace_no": wp,
+            "position": values[1] if len(values) > 1 else "",
+            "job_code": values[2] if len(values) > 2 else "",
+            "subdivision": current_headers[-1] if current_headers else "",
+            "subdivision_headers": list(current_headers),
+            "group_index": group_index,
+            "order": len(positions),
+        })
+
+    return positions, warnings
+
+
 # --- 6_4: позиции Перечня с привязкой к подразделению (строки-разделители) --
 def parse_perechen_positions_6_4(docx_path: str | Path) -> tuple[list[dict], list[str]]:
     """Вернуть позиции Перечня по порядку документа для сборки 6_4.
