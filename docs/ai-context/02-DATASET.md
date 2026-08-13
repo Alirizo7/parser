@@ -52,7 +52,7 @@
 | `employees_count_6_4` | str | pipeline | Численность из колонки «Ишловчилар сони» «Перечня» (6_4 считает ЛЮДЕЙ только отсюда, не из карты) |
 | `female_count_6_4` | str | pipeline | Из колонки «Шундан аёллар» «Перечня» |
 | `physical_measurements` | dict | extract | Excel-протокол 2: `{noise, vibration_local, vibration_general, infrasound}` → замер `{norma,actual,time,cls}` или `None` |
-| `microclimate_measurements` | dict | extract | Excel-протокол 3: `{category_label, temp, air_speed, humidity, heat_radiation}` (активная категория 1.8.x; метка — из 1.7.x) |
+| `microclimate_measurements` | dict | extract | Excel-протокол 3: `{category_label, temp, air_speed, humidity, heat_radiation, outdoor_temp}`. Внутри помещения выбирается активная сезонная ветка 1.8.x (тёплая) или 1.9.x (холодная), метка категории — из 1.7.x; наружная холодная температура — 1.10.1 |
 | `lighting_measurements` | dict | extract | Excel-протокол 4: `{discharge, natural, combined, artificial, pulsation}` (разряд зрит. работ + КЕО/лк/пульсация 1.11.*) |
 | `em_measurements` | dict | extract | Excel-протокол 5: `{"1.4.1"…"1.4.10"}` → замер или `None` (у медиков заполнена обычно только 1.4.10) |
 | `plan_6_6` | dict | extract | `severity_posture` = фактическая поза из строки `1.14.13`, вставляемая в мероприятие 6_6 по тяжести |

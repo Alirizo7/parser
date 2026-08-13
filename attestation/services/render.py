@@ -1129,8 +1129,8 @@ def _subrows_file3(wp: dict) -> list[dict]:
         _measure_fill(mc.get("temp")),           # 2 температура
         _measure_fill(mc.get("air_speed")),      # 3 скорость воздуха
         _measure_fill(mc.get("humidity")),       # 4 влажность
-        _measure_fill(mc.get("heat_radiation")), # 5 теплоизлучение («йўқ»)
-        _label_d_fill(""),                       # 6 температура (откр. территория)
+        _measure_fill(mc.get("heat_radiation")), # 5 теплоизлучение («йўқ»/число)
+        _measure_fill(mc.get("outdoor_temp")),   # 6 температура (откр. территория), 1.10.1
         _label_d_fill(""),                       # 7 WBGT
         _label_d_fill(""),                       # 8 средняя тепл. нагрузка TNS
     ]
@@ -1203,6 +1203,23 @@ def _has_em(wp: dict) -> bool:
     return any(v for v in (wp.get("em_measurements") or {}).values())
 
 
+# В исходном тёплом шаблоне строка наружной температуры была пустой, а строка
+# теплоизлучения содержала литералы «йўқ». Для числовых замеров им нужны формулы,
+# аналогичные соседним строкам. Добавляем их в прототип в памяти ДО capture_row;
+# текстовый факт затем штатно переопределит E:G/H через _measure_fill.
+_MICROCLIMATE_PROTO_FORMULAS = {
+    5: ("+1", "+2", "-3"),          # теплоизлучение, факт H
+    6: ("+0.1", "+0.2", "-0.3"),  # температура открытой территории, факт H
+}
+
+
+def _seed_microclimate_proto_formulas(ws, block_start: int) -> None:
+    for offset, suffixes in _MICROCLIMATE_PROTO_FORMULAS.items():
+        row = block_start + offset
+        for column, suffix in zip(range(5, 8), suffixes):
+            ws.cell(row=row, column=column).value = f"=H{row}{suffix}"
+
+
 # --- Общий рендер файлов 2–5 (фикс. блок из N под-строк) --------------------
 def _render_excel_blocks(company_data, workplaces, out_path, *, idx, subrows_of,
                          final_of, include, grouped, lang):
@@ -1210,6 +1227,8 @@ def _render_excel_blocks(company_data, workplaces, out_path, *, idx, subrows_of,
     ncols, gr, bs, blen = cfg["ncols"], cfg["group_row"], cfg["block_start"], cfg["block_len"]
     wb = load_workbook(str(TEMPLATE_EXCEL[idx]))
     ws = wb["complete"]
+    if idx == 3:
+        _seed_microclimate_proto_formulas(ws, bs)
 
     # Снять прототипы ДО очистки тела
     group_proto = xlsx.capture_row(ws, gr, ncols) if gr else None

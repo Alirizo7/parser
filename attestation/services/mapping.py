@@ -61,7 +61,10 @@ SUBDIVISION_ALIASES = {
 # --- Большая таблица факторов: опознаём по заголовку ---
 FACTOR_TABLE_HEADER_ANCHORS = ("меҳнат шароитлари класси", "гигиеник меъёр")
 FACTOR_HEADER_ACTUAL = "ҳақиқий"          # колонка «Ҳақиқий даражаси»
-FACTOR_HEADER_DURATION = "давомийлиги"    # колонка «Таъсир этиш давомийлиги (соат/%)»
+# У старых .doc после конвертации слово бывает разорвано как «давомий-лиги».
+# Матчим устойчивую основу, иначе duration остаётся на дефолтной колонке и в
+# 8-колоночной раскладке ошибочно дублирует actual.
+FACTOR_HEADER_DURATION = "давомий"        # колонка «Таъсир этиш давомийлиги (соат/%)»
 FACTOR_HEADER_CLASS = "класси"            # колонка «Меҳнат шароитлари класси» (последняя)
 FACTOR_HEADER_NORM = "меъёр"              # колонка «Гигиеник меъёр (РЭЧК, РЭЧД)» — норма (для Excel-протоколов)
 
@@ -128,15 +131,47 @@ PHYSICAL_SECTIONS = {
     "infrasound": "1.3.1",
 }
 
-# Файл 3 (микроклимат): раздел 1.8 (тёплый период, произв. помещения).
-#   1.8.1..1.8.5 — температура по категориям работ Iа/Iб/IIа/IIб/III; активна ОДНА
-#   (та, у которой факт непуст). Метка категории «Iб – 88(78-97)» берётся из
-#   параллельного раздела 1.7 (WBGT-индекс) с тем же номером под-строки.
+# Файл 3 (микроклимат):
+#   1.8 — тёплый период, производственные помещения;
+#   1.9 — холодный период, производственные помещения;
+#   1.10.1 — холодный период, открытая территория/неотапливаемые помещения.
+#
+# В разделах 1.8/1.9 первые пять строк — температура по категориям работ
+# Iа/Iб/IIа/IIб/III; активна ОДНА (та, у которой факт непуст). Метка категории
+# «Iб – 88(78-97)» берётся из параллельного раздела 1.7 с тем же номером строки.
+# Имена без WARM ниже исторические и означают тёплый раздел 1.8.
 MICROCLIMATE_TEMP_SECTIONS = ("1.8.1", "1.8.2", "1.8.3", "1.8.4", "1.8.5")
 MICROCLIMATE_CATEGORY_SECTIONS = ("1.7.1", "1.7.2", "1.7.3", "1.7.4", "1.7.5")
 MICROCLIMATE_HEAT_SECTION = "1.8.6"      # Иссиқлик тарқалиши (теплоизлучение; факт может быть «йўқ»)
 MICROCLIMATE_AIR_SPEED_SECTION = "1.8.7"  # Ҳаво ҳаракати тезлиги
 MICROCLIMATE_HUMIDITY_SECTION = "1.8.8"   # Ҳавонинг нисбий намлиги
+MICROCLIMATE_COLD_TEMP_SECTIONS = ("1.9.1", "1.9.2", "1.9.3", "1.9.4", "1.9.5")
+MICROCLIMATE_COLD_AIR_SPEED_SECTION = "1.9.6"
+MICROCLIMATE_COLD_HUMIDITY_SECTION = "1.9.7"
+MICROCLIMATE_COLD_HEAT_SECTION = "1.9.8"
+MICROCLIMATE_OUTDOOR_TEMP_SECTION = "1.10.1"
+# Короткий якорь принимает и «Ҳаво ҳарорати», и сокращённую «Ҳарорат», но не
+# строку-подытог, наследующую номер 1.10.1 после объединённой таблицы.
+MICROCLIMATE_TEMP_NAME_ANCHOR = "ҳарорат"
+
+# Приоритет сохраняет прежнее поведение, если в некорректной карте одновременно
+# заполнены обе сезонные ветки: сначала 1.8, затем 1.9. В штатной карте заполнена
+# только одна из них. Сопутствующие показатели всегда берутся из ТОЙ ЖЕ ветки,
+# чтобы не смешивать тёплые и холодные нормативы.
+MICROCLIMATE_INDOOR_PERIODS = (
+    {
+        "temp_sections": MICROCLIMATE_TEMP_SECTIONS,
+        "air_speed_section": MICROCLIMATE_AIR_SPEED_SECTION,
+        "humidity_section": MICROCLIMATE_HUMIDITY_SECTION,
+        "heat_section": MICROCLIMATE_HEAT_SECTION,
+    },
+    {
+        "temp_sections": MICROCLIMATE_COLD_TEMP_SECTIONS,
+        "air_speed_section": MICROCLIMATE_COLD_AIR_SPEED_SECTION,
+        "humidity_section": MICROCLIMATE_COLD_HUMIDITY_SECTION,
+        "heat_section": MICROCLIMATE_COLD_HEAT_SECTION,
+    },
+)
 # Единицы в метке категории 1.7.x, срезаемые для «Ishlar toifasi» (…, Vt/m).
 MICROCLIMATE_CATEGORY_UNIT_MARKERS = (", vt/m", ", вт/м", ", vt/kv.m", ", вт/кв.м")
 

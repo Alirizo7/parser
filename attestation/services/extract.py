@@ -289,6 +289,10 @@ def _factor_columns(grid: list[list[str]]) -> tuple[int, int, int, int, int]:
         for i, c in enumerate(row):
             if _contains(c, M.FACTOR_HEADER_ACTUAL):
                 actual_col = i
+            # Выбираем последнее совпадение: после конвертации объединённая
+            # duration-ячейка часто дублируется в двух соседних колонках, а
+            # данные продублированы там же. Это также не даёт duration совпасть
+            # с actual в 8-колоночной раскладке с продублированной norm-ячейкой.
             if _contains(c, M.FACTOR_HEADER_DURATION):
                 duration_col = i
             if _contains(c, "омиллари"):
@@ -461,31 +465,58 @@ def _strip_category_unit(name: str) -> str:
 
 
 def _extract_microclimate_measurements(rows: list[FactorRow]) -> dict:
-    """Файл 3: активная категория 1.8.x + температура/скорость/влажность/теплоизлучение.
+    """Файл 3: сезонные замеры микроклимата в помещении и на улице.
 
-    Активна та строка 1.8.1..1.8.5, у которой заполнен факт. Метка «Ishlar toifasi»
-    («Iб – 88(78-97)») берётся из параллельного раздела 1.7 (WBGT) с тем же номером.
+    В помещении активна одна температурная строка категории Iа..III: в тёплый
+    период это 1.8.1..1.8.5, в холодный — 1.9.1..1.9.5. Скорость, влажность и
+    теплоизлучение берутся из той же сезонной ветки. Метка ``Ishlar toifasi``
+    берётся из параллельного раздела 1.7 с тем же индексом категории.
+
+    Холодная наружная температура 1.10.1 независима от внутренней ветки. Якорь
+    по названию обязателен: после строки 1.10.1 парсер наследует её номер для
+    строки-подытога «Микроиқлим умумий баҳолаш», которую нельзя принять за замер.
     """
     temp = None
     category_label = ""
-    for idx, sec in enumerate(M.MICROCLIMATE_TEMP_SECTIONS):
-        fr = _row_by_section(rows, sec, need_actual=True)
-        if fr is not None:
+    active_period = None
+    for period in M.MICROCLIMATE_INDOOR_PERIODS:
+        for idx, sec in enumerate(period["temp_sections"]):
+            fr = _row_by_section(
+                rows, sec, need_actual=True,
+                name_anchor=M.MICROCLIMATE_TEMP_NAME_ANCHOR,
+            )
+            if fr is None:
+                continue
             temp = _measurement(fr)
+            active_period = period
             cat_fr = _row_by_section(rows, M.MICROCLIMATE_CATEGORY_SECTIONS[idx])
             if cat_fr and not is_empty(cat_fr.name):
                 category_label = _strip_category_unit(cat_fr.name)
             break
+        if temp is not None:
+            break
+
+    def indoor_measurement(key: str) -> dict | None:
+        if active_period is None:
+            return None
+        return _measurement_if_actual(
+            _row_by_section(rows, active_period[key], need_actual=True)
+        )
+
+    outdoor_temp = _measurement_if_actual(_row_by_section(
+        rows,
+        M.MICROCLIMATE_OUTDOOR_TEMP_SECTION,
+        need_actual=True,
+        name_anchor=M.MICROCLIMATE_TEMP_NAME_ANCHOR,
+    ))
     return {
         "category_label": category_label,
         "temp": temp,
-        "air_speed": _measurement_if_actual(
-            _row_by_section(rows, M.MICROCLIMATE_AIR_SPEED_SECTION)),
-        "humidity": _measurement_if_actual(
-            _row_by_section(rows, M.MICROCLIMATE_HUMIDITY_SECTION)),
+        "air_speed": indoor_measurement("air_speed_section"),
+        "humidity": indoor_measurement("humidity_section"),
         # Теплоизлучение: факт может быть текстом «йўқ» (не число) — сохраняем как есть.
-        "heat_radiation": _measurement_if_actual(
-            _row_by_section(rows, M.MICROCLIMATE_HEAT_SECTION)),
+        "heat_radiation": indoor_measurement("heat_section"),
+        "outdoor_temp": outdoor_temp,
     }
 
 
