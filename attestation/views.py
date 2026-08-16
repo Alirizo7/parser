@@ -5,19 +5,29 @@
 """
 from __future__ import annotations
 
+import logging
 import re
+from datetime import timedelta
 from pathlib import Path
 
 from django.conf import settings
 from django.contrib import messages
+from django.core.paginator import Paginator
 from django.http import FileResponse, Http404, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils import timezone
 from django.views.decorators.http import require_POST
 
 from . import jobs
 from .models import Batch
 from .services.extract import injury_risk_value, workplace_sort_key
+
+logger = logging.getLogger(__name__)
+
+DELETE_CLAIM_TIMEOUT = timedelta(minutes=15)
+DELETE_WORKER_TIMEOUT = timedelta(hours=1)
+DELETE_CLAIM_ATTEMPTS = 8
 
 YESNO = ["ҳа", "йўқ"]
 
@@ -97,8 +107,13 @@ def set_nested(record: dict, path: str, value: str) -> None:
 
 # --- Экраны -----------------------------------------------------------------
 def dashboard(request):
-    batches = Batch.objects.all()[:100]
-    return render(request, "attestation/dashboard.html", {"batches": batches})
+    paginator = Paginator(Batch.objects.order_by("-created_at", "-pk"), 25)
+    page_obj = paginator.get_page(request.GET.get("page"))
+    return render(
+        request,
+        "attestation/dashboard.html",
+        {"batches": page_obj.object_list, "page_obj": page_obj},
+    )
 
 
 def upload(request):
@@ -117,7 +132,10 @@ def upload(request):
             original_filename=f.name, archive=f, status=Batch.Status.UPLOADED,
             output_lang=lang,
         )
-        jobs.start_processing(batch.pk)
+        try:
+            jobs.start_processing(batch.pk)
+        except Exception:  # noqa: BLE001 — jobs уже пометил Batch как FAILED
+            messages.error(request, "Не удалось запустить обработку архива.")
         return redirect("attestation:detail", pk=batch.pk)
     return render(request, "attestation/upload.html", {"lang_choices": Batch.OutputLang.choices})
 
@@ -235,8 +253,159 @@ def generate(request, pk):
     if lang in Batch.OutputLang.values and lang != batch.output_lang:
         batch.output_lang = lang
         batch.save(update_fields=["output_lang", "updated_at"])
-    jobs.start_generation(batch.pk)
+    try:
+        started = jobs.start_generation(batch.pk)
+    except Exception:  # noqa: BLE001 — jobs уже сохранил причину в Batch.error
+        messages.error(request, "Не удалось запустить формирование документов.")
+        return redirect("attestation:detail", pk=pk)
+    if not started:
+        messages.info(request, "Эта работа уже обрабатывается.")
     return redirect("attestation:detail", pk=pk)
+
+
+def _dashboard_redirect(request):
+    """Вернуть оператора на ту же страницу списка после POST-действия."""
+    page = (request.POST.get("page") or "").strip()
+    if page.isdecimal() and int(page) > 1:
+        return redirect(f"{reverse('attestation:dashboard')}?page={int(page)}")
+    return redirect("attestation:dashboard")
+
+
+def _claim_batch_deletion(pk: int, *, now=None) -> str:
+    """CAS-захват удаления без долгой транзакции.
+
+    Возвращает ``waiting`` для активного worker-а, ``running`` для cleanup в
+    текущем request, ``already``/``missing`` или ``busy`` при необычно частой
+    конкурентной смене статуса.
+    """
+    now = now or timezone.now()
+    for _attempt in range(DELETE_CLAIM_ATTEMPTS):
+        state = Batch.objects.filter(pk=pk).values(
+            "status", "stage", "updated_at"
+        ).first()
+        if state is None:
+            return "missing"
+
+        status = state["status"]
+        stage = state["stage"]
+        updated_at = state["updated_at"]
+
+        if status == Batch.Status.PROCESSING:
+            claimed = Batch.objects.filter(
+                pk=pk, status=Batch.Status.PROCESSING
+            ).update(
+                status=Batch.Status.DELETING,
+                stage=jobs.DELETE_WAITING_STAGE,
+                updated_at=now,
+            )
+            if claimed == 1:
+                return "waiting"
+            continue
+
+        if status == Batch.Status.DELETING:
+            timeout = (
+                DELETE_WORKER_TIMEOUT
+                if stage == jobs.DELETE_WORKER_STAGE
+                else DELETE_CLAIM_TIMEOUT
+            )
+            if updated_at and updated_at >= now - timeout:
+                return "already"
+            claimed = Batch.objects.filter(
+                pk=pk,
+                status=Batch.Status.DELETING,
+                stage=stage,
+                updated_at=updated_at,
+            ).update(stage=jobs.DELETE_RUNNING_STAGE, updated_at=now)
+            if claimed == 1:
+                return "running"
+            continue
+
+        claimed = Batch.objects.filter(
+            pk=pk,
+            status=status,
+            updated_at=updated_at,
+        ).update(
+            status=Batch.Status.DELETING,
+            stage=jobs.DELETE_RUNNING_STAGE,
+            updated_at=now,
+        )
+        if claimed == 1:
+            return "running"
+
+    return "busy"
+
+
+@require_POST
+def delete_batch(request, pk):
+    """Удалить работу вместе со всеми строками и файлами."""
+    # Короткий атомарный UPDATE сначала останавливает worker-а. Файловый cleanup
+    # намеренно выполняется БЕЗ долгой DB-транзакции: SQLite не поддерживает
+    # select_for_update, и иначе progress-UPDATE мог бы привести к database locked.
+    claim = _claim_batch_deletion(pk)
+    if claim == "missing":
+        raise Http404("Работа не найдена")
+    if claim == "waiting":
+        # Tombstone остаётся до worker.finally: так SIGKILL/OOM не превращает
+        # поздно записанную папку в каталог без строки БД. Зависший tombstone
+        # можно забрать повторным запросом после DELETE_CLAIM_TIMEOUT.
+        messages.info(
+            request,
+            "Удаление запущено. Файлы будут удалены после остановки текущей обработки.",
+        )
+        return _dashboard_redirect(request)
+    if claim in ("already", "busy"):
+        messages.info(request, "Эта работа уже удаляется.")
+        return _dashboard_redirect(request)
+
+    batch = get_object_or_404(Batch, pk=pk)
+    filename = batch.original_filename
+    try:
+        jobs.delete_batch_artifacts(batch)
+    except Exception:  # noqa: BLE001 — ошибка storage/FS не должна удалить строку БД
+        logger.exception("Не удалось удалить файлы Batch #%s", batch.pk)
+        Batch.objects.filter(
+            pk=pk,
+            status=Batch.Status.DELETING,
+            stage=jobs.DELETE_RUNNING_STAGE,
+        ).update(
+            status=Batch.Status.FAILED,
+            stage=jobs.DELETE_FAILED_STAGE,
+            error="Не удалось удалить все файлы работы. Повторите попытку.",
+            updated_at=timezone.now(),
+        )
+        messages.error(
+            request,
+            "Не удалось удалить все файлы работы. Повторите попытку.",
+        )
+        return _dashboard_redirect(request)
+
+    try:
+        # SourceFile удаляются каскадно вместе с Batch.
+        Batch.objects.filter(
+            pk=pk,
+            status=Batch.Status.DELETING,
+            stage=jobs.DELETE_RUNNING_STAGE,
+        ).delete()
+    except Exception:  # noqa: BLE001 — файлы уже удалены, оставляем retryable запись
+        logger.exception("Не удалось удалить строку Batch #%s", pk)
+        Batch.objects.filter(
+            pk=pk,
+            status=Batch.Status.DELETING,
+            stage=jobs.DELETE_RUNNING_STAGE,
+        ).update(
+            status=Batch.Status.FAILED,
+            stage=jobs.DELETE_FAILED_STAGE,
+            error="Файлы удалены, но запись работы удалить не удалось. Повторите попытку.",
+            updated_at=timezone.now(),
+        )
+        messages.error(request, "Файлы удалены, но запись работы удалить не удалось.")
+        return _dashboard_redirect(request)
+
+    messages.success(
+        request,
+        f"Работа «{filename}» и все связанные файлы удалены.",
+    )
+    return _dashboard_redirect(request)
 
 
 def download(request, pk, which):

@@ -17,6 +17,7 @@ class Batch(models.Model):
         PROCESSING = "processing", "Обрабатывается"
         EXTRACTED = "extracted", "Извлечён"
         DONE = "done", "Готов"
+        DELETING = "deleting", "Удаляется"
         FAILED = "failed", "Ошибка"
 
     created_at = models.DateTimeField("Создан", auto_now_add=True)

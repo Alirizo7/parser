@@ -12,5 +12,6 @@ urlpatterns = [
     path("batch/<int:pk>/status/", views.status, name="status"),
     path("batch/<int:pk>/cell/", views.edit_cell, name="edit_cell"),
     path("batch/<int:pk>/generate/", views.generate, name="generate"),
+    path("batch/<int:pk>/delete/", views.delete_batch, name="delete_batch"),
     path("batch/<int:pk>/download/<str:which>/", views.download, name="download"),
 ]

@@ -11,7 +11,8 @@
 
 {% if batches %}
 <div class="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
-  <table class="min-w-full divide-y divide-slate-200 text-sm">
+  <div class="overflow-x-auto">
+  <table class="min-w-[820px] divide-y divide-slate-200 text-sm">
     <thead class="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
       <tr>
         <th class="px-4 py-3">Архив</th>
@@ -33,7 +34,7 @@
         <td class="px-4 py-3 text-slate-600">{{ batch.workplaces_count|default:"—" }}</td>
         <td class="px-4 py-3 text-slate-500">{{ batch.created_at|date:"d.m.Y H:i" }}</td>
         <td class="px-4 py-3">
-          <div class="flex items-center justify-end gap-2">
+          <div class="flex flex-wrap items-center justify-end gap-2">
             <a href="{% url 'attestation:detail' batch.pk %}"
                class="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50">Открыть</a>
             {% if batch.status == 'done' %}
@@ -46,13 +47,45 @@
                    class="rounded-lg border border-emerald-200 px-3 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-50">6_6</a>
               {% endif %}
             {% endif %}
+            <form method="post" action="{% url 'attestation:delete_batch' batch.pk %}"
+                  class="m-0"
+                  onsubmit="return confirm('Удалить работу «{{ batch.original_filename|escapejs }}» и все связанные файлы? Если обработка идёт, она будет остановлена. Отменить действие будет невозможно.')">
+              {% csrf_token %}
+              <input type="hidden" name="page" value="{{ page_obj.number }}">
+              <button type="submit"
+                      class="inline-flex items-center gap-1.5 rounded-lg border border-red-200 px-3 py-1.5 text-xs font-medium text-red-700 transition hover:bg-red-50 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-1">
+                <svg aria-hidden="true" viewBox="0 0 20 20" fill="currentColor" class="h-3.5 w-3.5">
+                  <path fill-rule="evenodd" d="M8.5 2a1.5 1.5 0 0 0-1.415 1H4.75a.75.75 0 0 0 0 1.5h.318l.62 11.174A2.5 2.5 0 0 0 8.184 18h3.632a2.5 2.5 0 0 0 2.496-2.326l.62-11.174h.318a.75.75 0 0 0 0-1.5h-2.335A1.5 1.5 0 0 0 11.5 2h-3Zm.25 5.25a.75.75 0 0 0-1.5 0v6.5a.75.75 0 0 0 1.5 0v-6.5Zm4 0a.75.75 0 0 0-1.5 0v6.5a.75.75 0 0 0 1.5 0v-6.5Z" clip-rule="evenodd" />
+                </svg>
+                Удалить
+              </button>
+            </form>
           </div>
         </td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
+  </div>
 </div>
+
+{% if page_obj.paginator.num_pages > 1 %}
+<nav class="mt-5 flex flex-col gap-3 text-sm sm:flex-row sm:items-center sm:justify-between" aria-label="Навигация по загрузкам">
+  <p class="text-slate-500">
+    Страница {{ page_obj.number }} из {{ page_obj.paginator.num_pages }}
+  </p>
+  <div class="flex flex-wrap items-center gap-2">
+    {% if page_obj.has_previous %}
+      <a href="?page={{ page_obj.previous_page_number }}"
+         class="rounded-lg border border-slate-200 bg-white px-3 py-2 font-medium text-slate-700 hover:bg-slate-50">← Назад</a>
+    {% endif %}
+    {% if page_obj.has_next %}
+      <a href="?page={{ page_obj.next_page_number }}"
+         class="rounded-lg border border-slate-200 bg-white px-3 py-2 font-medium text-slate-700 hover:bg-slate-50">Вперёд →</a>
+    {% endif %}
+  </div>
+</nav>
+{% endif %}
 {% else %}
 <div class="rounded-xl border border-dashed border-slate-300 bg-white p-12 text-center">
   <p class="text-slate-500">Пока нет загрузок.</p>

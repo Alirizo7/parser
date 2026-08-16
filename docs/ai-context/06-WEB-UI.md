@@ -10,6 +10,7 @@
 | `/batch/<pk>/status/` | `status` | HTMX-поллинг прогресса |
 | `/batch/<pk>/cell/` | `edit_cell` (POST) | Инлайн-сохранение одной ячейки ревью |
 | `/batch/<pk>/generate/` | `generate` (POST) | Запуск генерации документов (+смена языка) |
+| `/batch/<pk>/delete/` | `delete_batch` (POST) | Полное удаление завершённой работы и её файлов |
 | `/batch/<pk>/download/<which>/` | `download` | which ∈ 5_1b / 6_5 / 6_4 / 6_6 / excel_1…excel_5 |
 
 Плюс `config/urls.py`: `/admin/`, `/accounts/login/` (обёрнут в `login_not_required`),
@@ -39,6 +40,15 @@
    `jobs.generate_documents` (пять `render_excel_*` с `lang=batch.output_lang`).
 5. Кнопка «Сформировать документы» (radio выбора языка Кириллица/Lotin рядом) →
    `generate` → снова PROCESSING → поллинг → DONE.
+6. На дашборде каждая работа имеет красную кнопку «Удалить» с подтверждением. POST
+   удаляет `Batch`, связанные `SourceFile`, исходный ZIP и весь каталог
+   `media/batches/<id>`. Сначала короткий атомарный UPDATE переводит запись в
+   DELETING (без долгой SQLite-транзакции), затем чистится диск и удаляется строка.
+   Для активной thread/Celery-задачи DELETING остаётся tombstone до `worker.finally`:
+   worker останавливается между этапами, чистит файлы и только затем удаляет строку.
+   Поэтому SIGKILL/OOM не оставляет неотслеживаемый каталог. Зависший DELETING можно
+   повторно забрать через 15 минут. Список разбит на страницы по 25 работ; после
+   удаления сохраняется текущая страница.
 
 CSRF для HTMX: `<body hx-headers='{"X-CSRFToken": "…"}'>` в base.html — токен
 наследуется всеми htmx-запросами.

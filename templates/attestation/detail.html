@@ -18,6 +18,19 @@
 {% if batch.status == 'uploaded' or batch.status == 'processing' %}
   {% include "attestation/_progress.html" %}
 
+{# ── Удаление ──────────────────────────────────────────────────────────── #}
+{% elif batch.status == 'deleting' %}
+  <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+    <h2 class="font-semibold text-slate-900">Работа удаляется</h2>
+    <p class="mt-2 text-sm text-slate-600">
+      Текущая обработка останавливается, после чего архив и все результаты будут удалены.
+    </p>
+    <a href="{% url 'attestation:dashboard' %}"
+       class="mt-4 inline-block rounded-lg border border-slate-200 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">
+      Вернуться к загрузкам
+    </a>
+  </div>
+
 {# ── Ошибка ───────────────────────────────────────────────────────────── #}
 {% elif batch.status == 'failed' %}
   <div class="rounded-xl border border-red-200 bg-red-50 p-6">

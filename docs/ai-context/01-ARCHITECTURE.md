@@ -105,6 +105,18 @@ zip ──▶ unpack ──▶ convert (.doc→.docx) ──▶ extract (кар�
 `tasks.py` — две тонкие `@shared_task`-обёртки: `process_batch_task`,
 `generate_documents_task`.
 
+Удаление работы выполняется только POST-запросом с дашборда.
+`jobs.delete_batch_artifacts()` удаляет исходный архив через storage и строго
+ограниченный каталог `media/batches/<id>`; затем ORM удаляет `Batch` и каскадные
+`SourceFile`. Перед файловой операцией короткий UPDATE переводит Batch в DELETING:
+долгая транзакция не держится, что важно для SQLite web+worker. Для активной задачи
+строка DELETING служит tombstone: worker проверяет статус между этапами, а в
+`finally` чистит файлы и только затем удаляет строку. Поэтому SIGKILL/OOM не оставит
+неотслеживаемый каталог; зависший DELETE-claim можно повторить через 15 минут.
+`start_processing()`/`start_generation()` атомарно
+переводят запись в очередь, а worker атомарно забирает её по точному stage: двойной
+клик и повторная доставка Celery не запускают параллельный рендер одного батча.
+
 ### Раскладка файлов батча
 
 ```
